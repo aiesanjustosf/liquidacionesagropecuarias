@@ -69,8 +69,20 @@ def parse_number(raw: str) -> Optional[float]:
 def parse_cuit_digits(raw: str) -> str:
     if raw is None:
         return ""
-    d = re.sub(r"\D", "", str(raw))
-    return d
+    s = str(raw)
+    # Prefer explicit CUIT patterns if present (with or without hyphens)
+    m = re.search(r"\b(\d{2})\D?(\d{8})\D?(\d)\b", s)
+    if m:
+        return f"{m.group(1)}{m.group(2)}{m.group(3)}"
+
+    # Otherwise take the first 11-digit token, if any
+    m2 = re.search(r"\b(\d{11})\b", s)
+    if m2:
+        return m2.group(1)
+
+    # Fallback: strip non-digits and keep only the first 11 (avoid accidental concatenations)
+    d = re.sub(r"\D", "", s)
+    return d[:11] if len(d) >= 11 else d
 
 # ------------------------- Domain -------------------------
 
@@ -111,6 +123,8 @@ class Liquidacion:
     coe: str
     pv: str
     numero: str
+    # Datos de encabezado (Acopiador/Consignatario)
+    acopio: Party
     comprador: Party   # acopio
     vendedor: Party
     grano: str
@@ -122,9 +136,13 @@ class Liquidacion:
     iva: float
     total: float
     campaña: str
+    # MERCADERIA ENTREGADA
     me_nro_comprobante: str
-    me_procedencia: str
+    me_grado: str
+    me_factor: Optional[float]
+    me_contenido_proteico: Optional[float]
     me_peso_kg: Optional[float]
+    me_procedencia: str
     ret_iva: float
     ret_gan: float
     deducciones: List[DeductionLine]
@@ -155,96 +173,171 @@ def _extract_header_date_loc(page_text: str) -> Tuple[str, str]:
     m2 = re.search(r"(\d{2}/\d{2}/\d{4})", page_text)
     return (m2.group(1) if m2 else ""), ""
 
-def _slice_parties_block(page_text: str) -> str:
-    # Between "COMPRADOR" and "CONDICIONES" or "Actuó Corredor"
-    start = page_text.find("COMPRADOR")
-    if start == -1:
-        start = 0
-    end_candidates = [page_text.find("CONDICIONES"), page_text.find("Actuó Corredor"), page_text.find("ACTUÓ CORREDOR")]
-    end_candidates = [e for e in end_candidates if e != -1]
-    end = min(end_candidates) if end_candidates else len(page_text)
-    return page_text[start:end]
+def _party_from_text(side_text: str) -> Party:
+    """Parsea los campos habituales dentro del recuadro de COMPRADOR / VENDEDOR."""
+    if not side_text:
+        return Party()
+    # Normalizar saltos
+    txt = side_text.replace("\r", "\n")
 
-def _extract_two_values(lines: List[str], label: str) -> List[str]:
-    out: List[str] = []
-    for ln in lines:
-        if ln.strip().startswith(label):
-            out.append(ln.split(label, 1)[1].strip())
-    return out
+    lines = [l.strip() for l in txt.split("\n") if l.strip()]
 
-def _extract_parties(page_text: str, header_localidad: str) -> Tuple[Party, Party]:
-    """
-    pdfplumber's extract_text() may interleave columns inconsistently.
-    Empirically, in many LP/LS PDFs:
-      - "Razón Social:" values tend to appear in COMPRADOR then VENDEDOR order.
-      - "Domicilio/Localidad/CUIT/IVA" lines may appear in the opposite order.
-    Strategy:
-      1) Extract both razones (as roles: comprador=v1, vendedor=v2).
-      2) Extract other fields as two values (as indexes 0/1).
-      3) Choose which index belongs to the comprador by matching the header locality (Fecha y Localidad).
-    """
-    block = _slice_parties_block(page_text)
-    lines = [l.rstrip() for l in block.splitlines() if l.strip()]
+    def _take_multiline_value(label_regex: str, stop_regex: str) -> str:
+        """Toma el valor de un campo etiquetado y agrega líneas de continuación.
 
-    # --- Razones (role order) ---
-    razones: List[str] = []
-    for ln in lines:
-        if ln.strip().startswith("Razón Social:") or ln.strip().startswith("Razon Social:"):
-            val = ln.split(":", 1)[1].strip()
-            razones.append(val)
+        Esto es clave porque en estos PDFs la Razón Social y/o Domicilio puede venir
+        cortada en 2+ líneas.
+        """
+        for i, ln in enumerate(lines):
+            m = re.search(label_regex, ln, flags=re.IGNORECASE)
+            if not m:
+                continue
+            val = (m.group(1) or "").strip()
+            # Continuaciones: líneas siguientes que no sean otro campo
+            j = i + 1
+            while j < len(lines):
+                ln2 = lines[j]
+                if re.search(stop_regex, ln2, flags=re.IGNORECASE):
+                    break
+                # Evitar concatenar nuevos rótulos (cuando pdfplumber mezcló columnas)
+                if re.search(r"\bRaz[oó]n\s+Social\b\s*:", ln2, flags=re.IGNORECASE):
+                    break
+                if re.search(r"\bDomicilio\b\s*:", ln2, flags=re.IGNORECASE):
+                    break
+                if re.search(r"\bC\.U\.I\.T\b", ln2, flags=re.IGNORECASE):
+                    break
+                if re.search(r"\bI\.V\.A\b", ln2, flags=re.IGNORECASE):
+                    break
+                # Si la línea es claramente continuación (no tiene ':'), anexar
+                if ":" not in ln2:
+                    val = (val + " " + ln2).strip() if val else ln2
+                    j += 1
+                    continue
+                break
+            return re.sub(r"\s+", " ", val).strip()
+        return ""
 
-    # Try to attach wrapped continuation: if we have exactly 2 razones, and there's a standalone line
-    # that starts with "DE " or "DEL " right after the reasons block, attach to the first (common in cooperativas).
-    razones_clean: List[str] = []
-    for r in razones[:2]:
-        razones_clean.append(r)
-
-    for ln in lines:
-        if ":" not in ln and ln.strip() and (ln.strip().upper().startswith("DE ") or ln.strip().upper().startswith("DEL ")):
-            if len(razones_clean) >= 1 and " DE " not in _norm(razones_clean[0]):
-                razones_clean[0] = (razones_clean[0] + " " + ln.strip()).strip()
-            break
-
-    def pad2(arr: List[str]) -> List[str]:
-        arr = arr[:2]
-        while len(arr) < 2:
-            arr.append("")
-        return arr
-
-    razones_clean = pad2(razones_clean)
-
-    domicilios = pad2(_extract_two_values(lines, "Domicilio:"))
-    localidades = pad2(_extract_two_values(lines, "Localidad:"))
-    cuits = pad2(_extract_two_values(lines, "C.U.I.T.:") or _extract_two_values(lines, "C.U.I.T:"))
-    ivas = pad2(_extract_two_values(lines, "I.V.A.:") or _extract_two_values(lines, "I.V.A:"))
-
-    # Determine which index (0/1) is the comprador by matching header locality
-    hloc = _norm(header_localidad)
-    idx_comp = 0
-    if hloc:
-        if _norm(localidades[0]) == hloc:
-            idx_comp = 0
-        elif _norm(localidades[1]) == hloc:
-            idx_comp = 1
-
-    idx_vend = 1 - idx_comp
-
-    comprador = Party(
-        razon_social=razones_clean[0],
-        domicilio=domicilios[idx_comp],
-        localidad=localidades[idx_comp],
-        cuit=parse_cuit_digits(cuits[idx_comp]),
-        iva=ivas[idx_comp],
+    razon = _take_multiline_value(
+        r"Raz[oó]n\s+Social\s*:\s*(.*)$",
+        r"^(Domicilio|Localidad|C\.U\.I\.T|I\.V\.A|IIBB|Ingresos\s+Brutos)\b",
     )
-    vendedor = Party(
-        razon_social=razones_clean[1],
-        domicilio=domicilios[idx_vend],
-        localidad=localidades[idx_vend],
-        cuit=parse_cuit_digits(cuits[idx_vend]),
-        iva=ivas[idx_vend],
+    domicilio = _take_multiline_value(
+        r"Domicilio\s*:\s*(.*)$",
+        r"^(Localidad|C\.U\.I\.T|I\.V\.A|IIBB|Ingresos\s+Brutos)\b",
     )
 
-    return comprador, vendedor
+    # Campos de una sola línea
+    def _rgx_first(pat: str) -> str:
+        m = re.search(pat, txt, flags=re.IGNORECASE)
+        return m.group(1).strip() if m else ""
+
+    localidad = _rgx_first(r"Localidad\s*:\s*([^\n]+)")
+    cuit = parse_cuit_digits(_rgx_first(r"C\.U\.I\.T\.?\s*:?\s*([^\n]+)"))
+    iva = _rgx_first(r"I\.V\.A\.?\s*:?\s*([^\n]+)")
+
+    # Sanitización defensiva (cuando se mezclan columnas): cortar si aparece otro rótulo
+    def _cut_at_labels(v: str) -> str:
+        v2 = (v or "").strip()
+        if not v2:
+            return ""
+        for lab in ["RAZON SOCIAL", "DOMICILIO", "C.U.I.T", "I.V.A", "LOCALIDAD"]:
+            idx = _norm(v2).find(lab)
+            if idx > 0:
+                v2 = v2[:idx].strip()
+        return re.sub(r"\s+", " ", v2).strip()
+
+    razon = _cut_at_labels(razon)
+    domicilio = _cut_at_labels(domicilio)
+
+    return Party(razon_social=razon, domicilio=domicilio, localidad=localidad, cuit=cuit, iva=iva)
+
+def _group_words_to_lines(words: List[dict]) -> List[str]:
+    """Agrupa words de pdfplumber por línea usando coordenada 'top'."""
+    if not words:
+        return []
+    # sort top then x
+    ws = sorted(words, key=lambda w: (w.get("top", 0), w.get("x0", 0)))
+    lines: List[List[str]] = []
+    current: List[str] = []
+    current_top = ws[0].get("top", 0)
+
+    def flush():
+        nonlocal current
+        if current:
+            lines.append(current)
+            current = []
+
+    for w in ws:
+        top = w.get("top", 0)
+        if abs(top - current_top) > 3:  # nueva línea
+            flush()
+            current_top = top
+        current.append(w.get("text", ""))
+    flush()
+    return [" ".join(l).strip() for l in lines if " ".join(l).strip()]
+
+def _extract_parties_from_layout(page: pdfplumber.page.Page) -> Tuple[Party, Party, Party]:
+    """
+    Extrae:
+      - acopio (encabezado, arriba del recuadro)
+      - comprador (recuadro izquierdo)
+      - vendedor (recuadro derecho)
+
+    Se evita depender del orden de extract_text(), que suele mezclar columnas.
+    """
+    words = page.extract_words(keep_blank_chars=False, use_text_flow=True)
+    width = float(page.width)
+
+    # Split robusto: calcular usando las coordenadas de los títulos COMPRADOR y VENDEDOR
+    comprador_x0 = None
+    vendedor_x0 = None
+    for w in words:
+        t = _norm(w.get("text", ""))
+        if t == "COMPRADOR" and comprador_x0 is None:
+            comprador_x0 = float(w.get("x0", 0))
+        if t == "VENDEDOR" and vendedor_x0 is None:
+            vendedor_x0 = float(w.get("x0", 0))
+
+    if comprador_x0 is not None and vendedor_x0 is not None and vendedor_x0 > comprador_x0:
+        x_split = (comprador_x0 + vendedor_x0) / 2.0
+    else:
+        x_split = width / 2.0
+
+    # Localizar el bloque COMPRADOR/VENDEDOR por coordenadas
+    def find_top(token: str) -> Optional[float]:
+        tnorm = _norm(token)
+        tops = [w["top"] for w in words if _norm(w.get("text", "")) == tnorm]
+        return min(tops) if tops else None
+
+    y_compr = find_top("COMPRADOR")
+    y_actuo = find_top("ACTUÓ") or find_top("ACTUO")
+    y_start = y_compr if y_compr is not None else 0.0
+    y_end = y_actuo if y_actuo is not None else (y_start + 180.0)
+
+    # Nota: en estas liquidaciones el acopio coincide con el COMPRADOR.
+    # Para evitar mezclar columnas en extract_text(), se toma como acopio el recuadro izquierdo.
+
+    # Recorte de words dentro del bloque de recuadros
+    block_words = [w for w in words if (w.get("top", 0) >= y_start and w.get("top", 0) <= y_end)]
+    left_words = [w for w in block_words if w.get("x0", 0) < x_split]
+    right_words = [w for w in block_words if w.get("x0", 0) >= x_split]
+
+    left_text = "\n".join(_group_words_to_lines(left_words))
+    right_text = "\n".join(_group_words_to_lines(right_words))
+
+    comprador = _party_from_text(left_text)
+    vendedor = _party_from_text(right_text)
+
+    # Acopio: se asume equivalente al comprador (recuadro izquierdo)
+    acopio = Party(
+        razon_social=comprador.razon_social,
+        domicilio=comprador.domicilio,
+        localidad=comprador.localidad,
+        cuit=comprador.cuit,
+        iva=comprador.iva,
+    )
+
+    return acopio, comprador, vendedor
 
 def _extract_grain(page_text: str) -> Tuple[str, str]:
     # Look near conditions line or any "- MAIZ" occurrences.
@@ -272,7 +365,7 @@ def _extract_grain(page_text: str) -> Tuple[str, str]:
         gname = gnorm
     return gname.title() if gname != "MAIZ" else "Maíz", GRAIN_CODES.get(gname, "")
 
-def _extract_operation_numbers(page_text: str) -> Tuple[float, float, float, float, float]:
+def _extract_operation_numbers(page_text: str) -> Tuple[float, float, float, float, float, float]:
     """
     Returns: kilos, precio, neto, alic_iva, iva, total
     """
@@ -296,7 +389,7 @@ def _extract_campaign(page_text: str) -> str:
     m = re.search(r"Campaña\s*[:\-]\s*([^\n]+)", page_text, flags=re.IGNORECASE)
     return m.group(1).strip() if m else ""
 
-def _extract_me(page_text: str) -> Tuple[str, str, Optional[float]]:
+def _extract_me(page_text: str) -> Tuple[str, str, Optional[float], Optional[float], Optional[float], str]:
     # Isolate between MERCADERIA ENTREGADA and OPERACIÓN
     up = page_text.upper()
     start = up.find("MERCADERIA ENTREGADA")
@@ -306,57 +399,101 @@ def _extract_me(page_text: str) -> Tuple[str, str, Optional[float]]:
     if end == -1:
         end = up.find("OPERACION", start)
     if start == -1 or end == -1 or end <= start:
-        return "", "", None
+        return "", "", None, None, None, ""
     sec = page_text[start:end]
 
-    # Nro comprobante (first long integer)
+    # Intentar parsear la fila de la tabla:
+    # <Nro> <Grado> <Factor> <Contenido> <Peso> ... Localidad: <Procedencia>
     nro = ""
-    m = re.search(r"\b(\d{10,14})\b", sec)
-    if m:
-        nro = m.group(1).strip()
-
-    # Procedencia: capture between "Localidad:" and the comprobante number line
-    proced = ""
-    mproc = re.search(r"Localidad:\s*(.*?)\n\s*(\d{10,14})\b", sec, flags=re.IGNORECASE | re.DOTALL)
-    if mproc:
-        proced_raw = mproc.group(1).replace("\n", " ").strip()
-        proced = re.sub(r"\s+", " ", proced_raw)
-
-        # Sometimes province abbreviation sits on a standalone short line immediately after the comprobante row
-        sec_lines = [l.strip() for l in sec.splitlines() if l.strip()]
-        for i, l in enumerate(sec_lines):
-            if nro and nro in l:
-                if i + 1 < len(sec_lines):
-                    nxt = sec_lines[i + 1].strip()
-                    if re.fullmatch(r"[A-Za-z]{2,3}", nxt):
-                        proced = (proced + " " + nxt).strip()
-                break
-
-    # Peso (kg): take the last numeric token of the comprobante row
+    grado = ""
+    factor = None
+    prot = None
     peso = None
-    if nro:
-        for line in sec.splitlines():
-            if nro in line:
-                toks = re.findall(r"[-]?\d[\d.,]*", line)
-                if toks:
-                    peso = parse_number(toks[-1])
-                break
 
-    return nro, proced, peso
+    mrow = re.search(
+        r"\b(\d{10,14})\b\s+([A-Z0-9]{1,4})\s+([0-9][0-9.,]*)\s+([0-9][0-9.,]*)\s+([0-9][0-9.,]*)",
+        sec,
+        flags=re.IGNORECASE,
+    )
+    if mrow:
+        nro = mrow.group(1).strip()
+        grado = mrow.group(2).strip()
+        factor = parse_number(mrow.group(3))
+        prot = parse_number(mrow.group(4))
+        peso = parse_number(mrow.group(5))
+    else:
+        # fallback: primer nro largo + intentar peso
+        m = re.search(r"\b(\d{10,14})\b", sec)
+        if m:
+            nro = m.group(1).strip()
+            for line in sec.splitlines():
+                if nro in line:
+                    toks = re.findall(r"[-]?\d[\d.,]*", line)
+                    if toks:
+                        peso = parse_number(toks[-1])
+                    break
+
+    proced = ""
+    mloc = re.search(r"Localidad\s*:\s*([^\n]+)", sec, flags=re.IGNORECASE)
+    if mloc:
+        proced = re.sub(r"\s+", " ", mloc.group(1).strip())
+
+    return nro, grado, factor, prot, peso, proced
 
 def _extract_retenciones(page_text: str) -> Tuple[float, float]:
+    """Extrae retenciones IVA y Ganancias del bloque RETENCIONES.
+
+    En estas liquidaciones suele figurar como:
+      - "Retención de IVA" ... "5%" "$ 105,565.68"
+      - "Ret. Ganancias" ... "$ 0.00"
+    """
     ret_iva = 0.0
     ret_gan = 0.0
-    # IVA
-    for pat in [r"RET\s*IVA[^\n]*\$\s*([0-9][0-9.,]*)", r"I\.V\.A\.[^\n]*RET\s*IVA[^\n]*\$\s*([0-9][0-9.,]*)"]:
-        m = re.search(pat, page_text, flags=re.IGNORECASE)
+
+    up = page_text.upper()
+    s = up.find("RETENCIONES")
+    if s == -1:
+        return 0.0, 0.0
+
+    # terminar antes del bloque de condiciones / grado / otros
+    e_candidates = [
+        up.find("GRADO", s),
+        up.find("CONDICIONES", s),
+        up.find("OTROS", s),
+    ]
+    e_candidates = [e for e in e_candidates if e != -1]
+    e = min(e_candidates) if e_candidates else len(page_text)
+    sec = page_text[s:e]
+
+    def last_money(line: str) -> float:
+        nums = re.findall(r"[-]?\d[\d.,]*", line)
+        return parse_number(nums[-1]) or 0.0 if nums else 0.0
+
+    for ln in sec.splitlines():
+        ln_norm = _norm(ln)
+        # IVA: suele venir dividido en 2 líneas:
+        #   "Retención de IVA $"  (sin importe)
+        #   "I.V.A. ... 5% $ 105,565.68" (con importe)
+        if "RETENCION DE IVA" in ln_norm or "RETENCION IVA" in ln_norm:
+            # esta línea puede no traer el importe; se completa luego si aparece la línea I.V.A.
+            ret_iva = max(ret_iva, last_money(ln))
+        if "I V A" in ln_norm and "%" in ln and "$" in ln:
+            ret_iva = max(ret_iva, last_money(ln))
+
+        if "GANANCIAS" in ln_norm and ("RET" in ln_norm or "RETENCION" in ln_norm):
+            ret_gan = max(ret_gan, last_money(ln))
+
+    # fallback: por si vienen en una sola línea larga
+    if ret_iva == 0.0:
+        # buscar en línea I.V.A. con el último importe
+        m = re.search(r"\bI\.V\.A\..*?\$\s*([0-9][0-9.,]*)\s*$", sec, flags=re.IGNORECASE | re.MULTILINE)
         if m:
             ret_iva = parse_number(m.group(1)) or 0.0
-            break
-    # GAN
-    m = re.search(r"RET\s*GAN[^\n]*\$\s*([0-9][0-9.,]*)", page_text, flags=re.IGNORECASE)
-    if m:
-        ret_gan = parse_number(m.group(1)) or 0.0
+    if ret_gan == 0.0:
+        m = re.search(r"GANANCIAS.*?\$\s*([0-9][0-9.,]*)", sec, flags=re.IGNORECASE)
+        if m:
+            ret_gan = parse_number(m.group(1)) or 0.0
+
     return ret_iva, ret_gan
 
 def _extract_deducciones(page_text: str) -> List[DeductionLine]:
@@ -412,28 +549,39 @@ def _extract_deducciones(page_text: str) -> List[DeductionLine]:
 
 def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
     with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-        page = pdf.pages[0]
-        page_text = page.extract_text() or ""
+        page0 = pdf.pages[0]
+        # Importante: estas liquidaciones suelen tener 2 páginas y los bloques
+        # (retenciones / deducciones / etc.) pueden variar de ubicación.
+        full_text = "\n".join((p.extract_text() or "") for p in pdf.pages)
+        page0_text = page0.extract_text() or ""
 
-    full_norm = _norm(page_text)
-    fecha, localidad = _extract_header_date_loc(page_text)
+    full_norm = _norm(full_text)
+    # La fecha/localidad está en el encabezado (página 1)
+    fecha, localidad = _extract_header_date_loc(page0_text)
     tipo_cbte = _detect_tipo_cbte(full_norm)
 
-    mcoe = re.search(r"C\.O\.E\.\s*:\s*([0-9]{8,})", page_text, flags=re.IGNORECASE)
+    mcoe = re.search(r"C\.O\.E\.\s*:\s*([0-9]{8,})", full_text, flags=re.IGNORECASE)
     coe = mcoe.group(1).strip() if mcoe else ""
     pv = coe[:4] if len(coe) >= 4 else ""
     numero = coe[4:12] if len(coe) >= 12 else (coe[4:] if len(coe) > 4 else "")
 
-    comprador, vendedor = _extract_parties(page_text, localidad)
+    # Extraer acopio/comprador/vendedor por layout (evita mezcla de columnas)
+    try:
+        acopio, comprador, vendedor = _extract_parties_from_layout(page0)
+    except Exception:
+        # Fallback: si el layout falla, usar encabezado como acopio y dejar comprador/vendedor vacíos
+        acopio = Party()
+        comprador = Party()
+        vendedor = Party()
 
-    grano, cod_neto_venta = _extract_grain(page_text)
-    kilos, precio, neto, alic_iva, iva, total = _extract_operation_numbers(page_text)
+    grano, cod_neto_venta = _extract_grain(full_text)
+    kilos, precio, neto, alic_iva, iva, total = _extract_operation_numbers(full_text)
 
-    campaña = _extract_campaign(page_text)
-    me_nro, me_proced, me_peso = _extract_me(page_text)
+    campaña = _extract_campaign(full_text)
+    me_nro, me_grado, me_factor, me_prot, me_peso, me_proced = _extract_me(full_text)
 
-    ret_iva, ret_gan = _extract_retenciones(page_text)
-    deducciones = _extract_deducciones(page_text)
+    ret_iva, ret_gan = _extract_retenciones(full_text)
+    deducciones = _extract_deducciones(full_text)
 
     return Liquidacion(
         filename=filename,
@@ -444,6 +592,7 @@ def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
         coe=coe,
         pv=pv,
         numero=numero,
+        acopio=acopio,
         comprador=comprador,
         vendedor=vendedor,
         grano=grano,
@@ -456,8 +605,11 @@ def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
         total=total,
         campaña=campaña,
         me_nro_comprobante=me_nro,
-        me_procedencia=me_proced,
+        me_grado=me_grado,
+        me_factor=me_factor,
+        me_contenido_proteico=me_prot,
         me_peso_kg=me_peso,
+        me_procedencia=me_proced,
         ret_iva=ret_iva,
         ret_gan=ret_gan,
         deducciones=deducciones,
