@@ -40,8 +40,10 @@ def build_excel_ventas(docs: List[LiquidacionDoc]) -> BytesIO:
     ws.append(headers)
     _set_widths(ws, [14,14,8,6,7,12,45,10,14,40,6,6,10,10,14,8,14,14,12,16])
 
-    amt_fmt = "#.##0,00"
-    aliq_fmt = "#.##0,000"
+    # Excel usa separadores según configuración regional; el formato estándar
+    # (#,##0.00) se mostrará como 1.000.000,00 en AR.
+    amt_fmt = "#,##0.00"
+    aliq_fmt = "#,##0.000"
 
     for d in docs:
         pv, nro = _pv_nro_from_coe(d.coe)
@@ -61,8 +63,8 @@ def build_excel_ventas(docs: List[LiquidacionDoc]) -> BytesIO:
                 d.fecha, d.fecha, "RV", "A", pv, nro,
                 d.comprador_rs, 80, d.comprador_cuit, d.comprador_dom,
                 None, None, d.comprador_cf, cod_neto,
-                amount, None, None, None,
-                code, None
+                None, None, None, None,
+                code, amount
             ])
 
         # Retenciones: una línea por retención

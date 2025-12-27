@@ -30,8 +30,8 @@ def build_excel_gastos(docs: List[LiquidacionDoc]) -> BytesIO:
     ws.append(headers)
     _set_widths(ws, [14,14,8,8,7,12,45,10,14,40,6,6,10,10,14,8,14,14,12,16])
 
-    amt_fmt = "#.##0,00"
-    aliq_fmt = "#.##0,000"
+    amt_fmt = "#,##0.00"
+    aliq_fmt = "#,##0.000"
 
     for d in docs:
         pv, nro = _pv_nro_from_coe(d.coe)

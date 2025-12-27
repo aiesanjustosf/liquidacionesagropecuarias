@@ -111,11 +111,43 @@ def _extract_coe(full_text: str) -> Optional[str]:
 
 
 def _extract_fecha_localidad(full_text: str) -> Tuple[Optional[str], Optional[str]]:
-    m = re.search(r"(\d{2}/\d{2}/\d{4})\s*[,–\-]\s*([A-ZÁÉÍÓÚÜÑ\.\-\s]+)", full_text)
+    # Importante: NO permitir que la localidad capture saltos de línea.
+    # En varios PDFs la línea de encabezado se parte y, si usamos \s, termina capturando el título
+    # "LIQUIDACIÓN ..." dentro de la localidad.
+    m = re.search(r"(\d{2}/\d{2}/\d{4})\s*[,–\-]\s*([^\n\r]+)", full_text)
     if m:
         return m.group(1), _norm(m.group(2)).title()
     m = re.search(r"(\d{2}/\d{2}/\d{4})", full_text)
     return (m.group(1) if m else None, None)
+
+
+def _extract_operacion_line(full_text: str) -> Dict[str, Optional[float]]:
+    """
+    Extrae kilos, precio/kg, subtotal, alícuota, IVA y total desde la fila de "OPERACIÓN".
+    Formato típico (según extract_text):
+      10000 Kg $258.50 $2585000.00 10.5 $271425.00 $2856425.00
+    """
+    lines = (full_text or "").splitlines()
+    for i, ln in enumerate(lines):
+        if "Cantidad" in ln and "Precio" in ln and "Operación" in ln:
+            # la fila de datos suele venir inmediatamente después
+            if i + 1 < len(lines):
+                data = _norm(lines[i + 1])
+                m = re.search(
+                    r"(?P<kg>[\d\.,]+)\s*Kg\s+\$\s*(?P<precio>[\d\.,]+)\s+\$\s*(?P<sub>[\d\.,]+)\s+(?P<alic>[\d\.,]+)\s+\$\s*(?P<iva>[\d\.,]+)\s+\$\s*(?P<tot>[\d\.,]+)",
+                    data,
+                    flags=re.I,
+                )
+                if m:
+                    return {
+                        "kilos": parse_ar_number(m.group("kg")),
+                        "precio_kg": parse_ar_number(m.group("precio")),
+                        "subtotal": parse_ar_number(m.group("sub")),
+                        "alicuota": parse_ar_number(m.group("alic")),
+                        "iva": parse_ar_number(m.group("iva")),
+                        "total": parse_ar_number(m.group("tot")),
+                    }
+    return {"kilos": None, "precio_kg": None, "subtotal": None, "alicuota": None, "iva": None, "total": None}
 
 
 def _extract_campania(full_text: str) -> Optional[str]:
@@ -230,6 +262,9 @@ def _extract_grano(full_text: str) -> Optional[str]:
 
 
 def _extract_kilos(full_text: str) -> Optional[float]:
+    op = _extract_operacion_line(full_text)
+    if op.get("kilos") is not None:
+        return op["kilos"]
     m = re.search(r"Peso\s*:?\s*([\d\.,]+)\s*kg", full_text, flags=re.I)
     if not m:
         m = re.search(r"Cantidad\s*:?\s*([\d\.,]+)\s*kg", full_text, flags=re.I)
@@ -237,6 +272,9 @@ def _extract_kilos(full_text: str) -> Optional[float]:
 
 
 def _extract_precio_kg(full_text: str) -> Optional[float]:
+    op = _extract_operacion_line(full_text)
+    if op.get("precio_kg") is not None:
+        return op["precio_kg"]
     m = re.search(r"Precio\s*/\s*Kg\s*:?\s*\$?\s*([\d\.,]+)", full_text, flags=re.I)
     if not m:
         m = re.search(r"Precio\s*/\s*kg\s*:?\s*\$?\s*([\d\.,]+)", full_text, flags=re.I)
@@ -249,17 +287,13 @@ def _extract_totales(full_text: str) -> Dict[str, Optional[float]]:
     total: Optional[float] = None
     alic: Optional[float] = None
 
-    # Caso típico: línea OPERACIÓN con 3 importes + alícuota
-    m = re.search(
-        r"OPERACI[ÓO]N.*?\$\s*([\d\.,]+)\s+([\d\.,]+)\s+\$\s*([\d\.,]+)\s+\$\s*([\d\.,]+)",
-        full_text,
-        flags=re.I | re.S
-    )
-    if m:
-        subtotal = parse_ar_number(m.group(1))
-        alic = parse_ar_number(m.group(2))
-        iva = parse_ar_number(m.group(3))
-        total = parse_ar_number(m.group(4))
+    # Preferencia: fila de operación (con kilos/precio/subtotal/alícuota/iva/total)
+    op = _extract_operacion_line(full_text)
+    if op.get("subtotal") is not None:
+        subtotal = op["subtotal"]
+        alic = op.get("alicuota")
+        iva = op.get("iva")
+        total = op.get("total")
 
     # Alternativa con etiquetas
     if subtotal is None:
@@ -387,18 +421,24 @@ def _extract_retenciones_from_tables(pdf_bytes: bytes) -> Tuple[Optional[float],
                 for row in tbl:
                     row_txt = " ".join([_norm(str(c)) for c in row if c is not None])
                     row_up = _upper_ascii(row_txt)
-                    nums = re.findall(r"[\$]?\s*[\d\.,]+", row_txt)
-                    amt = parse_ar_number(nums[-1]) if nums else None
+
+                    # Solo considerar importes monetarios explícitos (precedidos por '$').
+                    money = re.findall(r"\$\s*([\d\.,]+)", row_txt)
+                    if not money:
+                        continue
+                    amt = parse_ar_number(money[-1])
                     if amt is None:
                         continue
 
-                    if "GAN" in row_up:
-                        ret_gan += amt
-                        found = True
+                    if ("GAN" in row_up) or ("GANAN" in row_up):
+                        if amt != 0:
+                            ret_gan += amt
+                            found = True
 
-                    if "IVA" in row_up and "4310" not in row_up and "RG" not in row_up:
-                        ret_iva += amt
-                        found = True
+                    if ("IVA" in row_up) and ("4310" not in row_up) and ("RG" not in row_up):
+                        if amt != 0:
+                            ret_iva += amt
+                            found = True
 
     if not found:
         return None, None
@@ -424,65 +464,42 @@ def _extract_retenciones_from_block(full_text: str) -> Tuple[Optional[float], Op
     ret_iva: Optional[float] = None
     ret_gan: Optional[float] = None
 
-    def money_candidates(s: str):
-        cands = re.findall(r"\d[\d\.,]*\d", s)
-        filtered = []
-        for c in cands:
-            if re.search(rf"{re.escape(c)}\s*%", s):
-                continue
-            filtered.append(c)
-        return filtered
+    def last_money_amount(s: str) -> Optional[float]:
+        money = re.findall(r"\$\s*([\d\.,]+)", s)
+        if not money:
+            return None
+        return parse_ar_number(money[-1])
 
-    last_used_idx = -1
-
-    def take_next_line_amount(base_from: int, stop_words: List[str]) -> Tuple[Optional[float], int]:
-        for j in range(base_from, min(base_from + 6, len(lines))):
+    def lookahead_money(start_idx: int, stop_tokens: List[str]) -> Optional[float]:
+        # Buscar en las próximas líneas un importe monetario explícito.
+        for j in range(start_idx, min(start_idx + 6, len(lines))):
             lup = _upper_ascii(lines[j])
-            if any(sw in lup for sw in stop_words):
+            if any(tok in lup for tok in stop_tokens):
                 break
-            cands = money_candidates(lines[j])
-            if len(cands) >= 2:
-                return parse_ar_number(cands[-1]), j
-            if len(cands) == 1:
-                v = parse_ar_number(cands[0])
-                if v not in (None, 0.0):
-                    return v, j
-        return None, -1
+            v = last_money_amount(lines[j])
+            if v not in (None, 0.0):
+                return v
+        return None
 
     for i, ln in enumerate(lines):
         lup = _upper_ascii(ln)
 
-        if ("RET IVA" in lup) or ("IVA" in lup and "RET" in lup and "4310" not in lup):
-            cands = money_candidates(ln)
-            amt = None
-            used_idx = -1
-            if cands:
-                amt = parse_ar_number(cands[-1])
-                if amt in (None, 0.0):
-                    amt, used_idx = take_next_line_amount(max(i + 1, last_used_idx + 1), stop_words=["GAN"])
-            else:
-                amt, used_idx = take_next_line_amount(max(i + 1, last_used_idx + 1), stop_words=["GAN"])
-
+        # IVA
+        if ("RET IVA" in lup) or ("RETENCION" in lup and "IVA" in lup) or ("I.V.A." in lup and "RET" in lup):
+            amt = last_money_amount(ln)
+            if amt is None:
+                amt = lookahead_money(i + 1, stop_tokens=["GAN"])
             if amt not in (None, 0.0):
                 ret_iva = amt
-                if used_idx != -1:
-                    last_used_idx = used_idx
 
-        if ("RET GAN" in lup) or ("GAN" in lup and "RET" in lup):
-            cands = money_candidates(ln)
-            amt = None
-            used_idx = -1
-            if cands:
-                amt = parse_ar_number(cands[-1])
-                if amt in (None, 0.0):
-                    amt, used_idx = take_next_line_amount(max(i + 1, last_used_idx + 1), stop_words=["IVA"])
-            else:
-                amt, used_idx = take_next_line_amount(max(i + 1, last_used_idx + 1), stop_words=["IVA"])
-
+        # GANANCIAS
+        if ("RET GAN" in lup) or ("RET." in lup and "GAN" in lup) or ("GANAN" in lup and "RET" in lup):
+            amt = last_money_amount(ln)
+            # Si la fila tiene importes en cero, no buscar en líneas siguientes: evita capturar códigos (ej: 58699|...)
+            if amt is None:
+                amt = lookahead_money(i + 1, stop_tokens=["IVA"])
             if amt not in (None, 0.0):
                 ret_gan = amt
-                if used_idx != -1:
-                    last_used_idx = used_idx
 
     return ret_iva, ret_gan
 

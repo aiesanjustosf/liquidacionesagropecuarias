@@ -25,7 +25,7 @@ def build_excel_cpns(docs: List[LiquidacionDoc]) -> BytesIO:
     ws.append(headers)
     _set_widths(ws, [12,18,40,16,14,18,12,18,18,25,14,20,10,10,18])
 
-    amt_fmt = "#.##0,00"
+    amt_fmt = "#,##0.00"
 
     for d in docs:
         pv = (d.coe or "")[:4]
@@ -52,7 +52,8 @@ def build_excel_cpns(docs: List[LiquidacionDoc]) -> BytesIO:
         ])
 
     for r in range(2, ws.max_row + 1):
-        for c in [6,7,11]:
+        # Kilos, precio, peso mercadería entregada
+        for c in [6, 7, 11]:
             cell = ws.cell(row=r, column=c)
             if isinstance(cell.value, (int, float)):
                 cell.number_format = amt_fmt
