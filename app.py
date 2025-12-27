@@ -1,134 +1,119 @@
-# -*- coding: utf-8 -*-
-from __future__ import annotations
-
-import pandas as pd
 import streamlit as st
+import pandas as pd
+from pathlib import Path
 from PIL import Image
 
-from parser import parse_liquidacion_pdf, Liquidacion
-from exporters import build_ventas_rows, build_cpns_rows, build_gastos_rows, df_to_xlsx_bytes
+from src.parser_liquidaciones import parse_liquidacion_pdf
+from src.export_ventas import build_excel_ventas
+from src.export_cpns import build_excel_cpns
+from src.export_gastos import build_excel_gastos
 
 APP_TITLE = "IA liquidaciones agropecuarias"
-FOOTER = "Herramienta para uso interno AIE San Justo | Developer Alfonso Alderete"
-PRIVACY_NOTE = "La app no almacena datos, toda la información está protegida."
 
-LOGO_PATH = "assets/logo_aie.png"
+ASSETS_DIR = Path(__file__).parent / "assets"
+LOGO_PATH = ASSETS_DIR / "logo_aie.png"
 
-# ---------------- Page config ----------------
-logo_img = Image.open(LOGO_PATH)
+
 st.set_page_config(
     page_title=APP_TITLE,
-    page_icon=logo_img,
+    page_icon=Image.open(LOGO_PATH) if LOGO_PATH.exists() else None,
     layout="wide",
 )
 
-# ---------------- Header ----------------
-col1, col2 = st.columns([1, 7])
-with col1:
-    st.image(logo_img, use_container_width=True)
-with col2:
+c1, c2 = st.columns([1, 6])
+with c1:
+    if LOGO_PATH.exists():
+        st.image(str(LOGO_PATH), use_container_width=True)
+with c2:
     st.title(APP_TITLE)
 
-st.caption(PRIVACY_NOTE)
-
-st.divider()
-
-# ---------------- Uploader ----------------
-uploaded_files = st.file_uploader(
-    "Subí una o varias liquidaciones (PDF)",
+pdf_files = st.file_uploader(
+    "Subí una o más liquidaciones (PDF)",
     type=["pdf"],
-    accept_multiple_files=True,
+    accept_multiple_files=True
 )
 
-liqs: list[Liquidacion] = []
-errors: list[str] = []
-
-if uploaded_files:
-    for uf in uploaded_files:
-        try:
-            liq = parse_liquidacion_pdf(uf.read(), uf.name)
-            liqs.append(liq)
-        except Exception as e:
-            errors.append(f"{uf.name}: {e}")
-
-# ---------------- Preview grid ----------------
-st.subheader("Vista previa (datos detectados)")
-
-if errors:
-    st.error("Algunos archivos no pudieron procesarse:")
-    for e in errors:
-        st.write(f"- {e}")
-
-if not liqs:
-    st.info("Subí PDFs para ver la vista previa y habilitar las descargas.")
-else:
+if pdf_files:
+    parsed = []
     preview_rows = []
-    for l in liqs:
-        preview_rows.append({
-            "Archivo": l.filename,
-            "Fecha": l.fecha,
-            "Localidad": l.localidad,
-            "Tipo": l.tipo_cbte,
-            "C.O.E.": l.coe,
-            "PV": l.pv,
-            "Número": l.numero,
-            "Comprador (acopio)": l.comprador.razon_social,
-            "CUIT comprador": l.comprador.cuit,
-            "Grano": l.grano,
-            "Kilos": l.kilos,
-            "Precio": l.precio,
-            "Neto": l.neto,
-            "IVA": l.iva,
-            "Total": l.total,
-            "Ret IVA": l.ret_iva,
-            "Ret Gan": l.ret_gan,
-            "Campaña": l.campaña,
-            "ME Nro": l.me_nro_comprobante,
-            "ME Procedencia": l.me_procedencia,
-            "ME Peso (kg)": l.me_peso_kg,
-        })
-    preview_df = pd.DataFrame(preview_rows)
-    st.dataframe(preview_df, use_container_width=True, hide_index=True)
 
-    st.divider()
-    st.subheader("Descargas")
+    with st.spinner("Procesando PDFs..."):
+        for uf in pdf_files:
+            data = uf.read()
+            doc = parse_liquidacion_pdf(data, filename=uf.name)
+            parsed.append(doc)
 
-    ventas_df = build_ventas_rows(liqs)
-    cpns_df = build_cpns_rows(liqs)
-    gastos_df = build_gastos_rows(liqs)
+            preview_rows.append({
+                "Archivo": uf.name,
+                "Fecha": doc.fecha,
+                "Localidad": doc.localidad,
+                "COE": doc.coe,
+                "Tipo": doc.tipo_comprobante,
+                "Acopio/Comprador": doc.comprador_rs,
+                "CUIT Comprador": doc.comprador_cuit,
+                "Grano": doc.grano,
+                "Kg": doc.kilos,
+                "Precio/Kg": doc.precio_kg,
+                "Subtotal": doc.subtotal,
+                "Alic IVA": doc.alicuota_iva,
+                "IVA": doc.iva,
+                "Total": doc.total,
+                "Ret IVA": doc.ret_iva,
+                "Ret Gan": doc.ret_gan,
+            })
 
-    colA, colB, colC = st.columns(3)
+    st.subheader("Vista previa")
+    df = pd.DataFrame(preview_rows)
 
-    with colA:
-        st.write("**Excel Ventas** (modelo HWVta1modelo)")
+    def fmt_amount(x):
+        if x is None or (isinstance(x, float) and pd.isna(x)):
+            return ""
+        if isinstance(x, (int, float)):
+            return f"{x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        return x
+
+    def fmt_aliq(x):
+        if x is None or (isinstance(x, float) and pd.isna(x)):
+            return ""
+        if isinstance(x, (int, float)):
+            return f"{x:,.3f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        return x
+
+    df_show = df.copy()
+    for col in ["Kg","Precio/Kg","Subtotal","IVA","Total","Ret IVA","Ret Gan"]:
+        if col in df_show.columns:
+            df_show[col] = df_show[col].apply(fmt_amount)
+    if "Alic IVA" in df_show.columns:
+        df_show["Alic IVA"] = df_show["Alic IVA"].apply(fmt_aliq)
+
+    st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        out = build_excel_ventas(parsed)
         st.download_button(
-            label="Descargar Ventas.xlsx",
-            data=df_to_xlsx_bytes(ventas_df, "Ventas"),
-            file_name="VENTAS_liquidaciones.xlsx",
+            "Descargar Ventas",
+            data=out.getvalue(),
+            file_name="ventas.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
         )
-        st.caption(f"Reglas: F1/F2 según tipo de liquidación; retenciones IVA/Ganancias como RV (RA07/RA05).")
-
-    with colB:
-        st.write("**Excel CPNs**")
+    with col2:
+        out = build_excel_cpns(parsed)
         st.download_button(
-            label="Descargar CPNs.xlsx",
-            data=df_to_xlsx_bytes(cpns_df, "CPNs"),
-            file_name="CPNs_liquidaciones.xlsx",
+            "Descargar CPNs",
+            data=out.getvalue(),
+            file_name="cpns.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
         )
-        st.caption("Incluye Mercadería Entregada; Campaña es opcional (solo si el PDF la trae).")
-
-    with colC:
-        st.write("**Excel Gastos** (modelo compras HWCpra1)")
+    with col3:
+        out = build_excel_gastos(parsed)
         st.download_button(
-            label="Descargar Gastos.xlsx",
-            data=df_to_xlsx_bytes(gastos_df, "Gastos"),
-            file_name="GASTOS_liquidaciones.xlsx",
+            "Descargar Gastos",
+            data=out.getvalue(),
+            file_name="gastos.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
         )
-        st.caption("Proveedor = acopio; movimiento 203 (o 202 si IVA 21%). Exento puede ir en la misma línea.")
 
-# ---------------- Footer ----------------
-st.divider()
-st.caption(FOOTER)
