@@ -442,73 +442,83 @@ def _extract_percepcion_iva(full_text: str) -> float:
 
 def _extract_retenciones(page_text: str) -> Tuple[float, float]:
     """
-    Definitivo:
-    - ret_iva = importe de "Retención de IVA" dentro del bloque RETENCIONES
-    - ret_gan = importe de "Ret. Ganancias" dentro del bloque RETENCIONES
-    NO toma porcentajes ni otros importes.
+    Lee la TABLA de RETENCIONES:
+      Concepto | Detalle | ... | Base Cálculo | Alícuota | Retenciones (monto)
+
+    Robusto a PDFs donde:
+    - la fila viene partida en varias líneas
+    - el monto no tiene '$'
+    - hay retenciones en 0
     """
     up = (page_text or "").upper()
     s = up.find("RETENCIONES")
     if s == -1:
         return 0.0, 0.0
 
-    e_candidates = [
-        up.find("GRADO", s),
-        up.find("CONDICIONES", s),
-        up.find("OTROS", s),
-        up.find("OPERACIÓN", s),
-        up.find("OPERACION", s),
-    ]
-    e_candidates = [e for e in e_candidates if e != -1]
-    e = min(e_candidates) if e_candidates else len(page_text)
+    # cortar al finalizar la sección (normalmente antes de IMPORTES TOTALES)
+    e = up.find("IMPORTES TOTALES", s)
+    if e == -1:
+        # fallback por si cambia el título
+        e_candidates = [
+            up.find("IMPORTES TOTALES DE LA LIQUIDACIÓN", s),
+            up.find("OPERACIÓN", s),
+            up.find("OPERACION", s),
+        ]
+        e_candidates = [x for x in e_candidates if x != -1]
+        e = min(e_candidates) if e_candidates else len(page_text)
 
     sec = page_text[s:e]
     lines = [ln.strip() for ln in sec.splitlines() if ln.strip()]
 
-    def last_amount_with_dollar(ln: str) -> Optional[float]:
-        # solo montos con $, toma el ÚLTIMO (si hay base y monto, el último es el monto)
-        ms = re.findall(r"\$\s*([-]?\d[\d.,]*)", ln)
-        if not ms:
-            return None
-        return parse_number(ms[-1])
-
-    def pick_near(i: int, prefer: List[str]) -> Optional[float]:
-        cands: List[Tuple[int, str, float]] = []
-        for j in range(i, min(i + 3, len(lines))):
-            v = last_amount_with_dollar(lines[j])
+    def last_non_percent_number(text: str) -> float:
+        """
+        Devuelve el último número de la ventana que NO sea porcentaje.
+        Eso coincide con la columna 'Retenciones' de la tabla, incluso sin '$'.
+        """
+        best = None
+        for m in re.finditer(r"[-]?\d[\d.,]*", text):
+            token = m.group(0)
+            v = parse_number(token)
             if v is None:
                 continue
-            cands.append((j, _norm(lines[j]), float(v)))
-        if not cands:
-            return None
-        for kw in prefer:
-            kw_n = _norm(kw)
-            pref = [c for c in cands if kw_n in c[1]]
-            if pref:
-                return pref[-1][2]
-        return cands[-1][2]
+            after = text[m.end():m.end() + 3]
+            if re.match(r"\s*%", after):  # no tomar alícuota
+                continue
+            best = float(v)
+        return float(best or 0.0)
 
-    ret_iva: Optional[float] = None
-    ret_gan: Optional[float] = None
+    def is_iva_row_start(ln: str) -> bool:
+        n = ln.upper()
+        return (("I.V.A" in n) or ("I V A" in n) or n.startswith("IVA")) and ("RET" in n or "RETENC" in n) and ("GANANC" not in n)
 
+    def is_gan_row_start(ln: str) -> bool:
+        n = ln.upper()
+        return ("GANANC" in n or "RET.GAN" in n) and ("RET" in n or "RETENC" in n)
+
+    def window_from(i: int, stop_pred, max_lines: int = 10) -> str:
+        parts = [lines[i]]
+        for j in range(i + 1, min(len(lines), i + max_lines)):
+            if stop_pred(lines[j]):
+                break
+            parts.append(lines[j])
+        return " ".join(parts)
+
+    ret_iva = 0.0
+    ret_gan = 0.0
+
+    # Ganancias: ventana hasta antes de la fila IVA (así no se contamina)
     for i, ln in enumerate(lines):
-        n = _norm(ln)
+        if is_gan_row_start(ln):
+            win = window_from(i, stop_pred=is_iva_row_start, max_lines=12)
+            ret_gan = last_non_percent_number(win)
+            break
 
-        # ANCLA: "RETENCION ... IVA" (y NO Ganancias)
-        if ("RETENC" in n or "RET." in n or "RET " in n) and ("IVA" in n) and ("GANANC" not in n):
-            v = pick_near(i, prefer=["I.V.A", "I V A", "IVA"])
-            if v is not None:
-                if ret_iva is None or abs(v) > abs(ret_iva):
-                    ret_iva = v
-            continue
-
-        # ANCLA: Ganancias
-        if ("GANANC" in n) and ("RET" in n or "RETENC" in n):
-            v = pick_near(i, prefer=["GANANCIAS"])
-            if v is not None:
-                if ret_gan is None or abs(v) > abs(ret_gan):
-                    ret_gan = v
-            continue
+    # IVA: desde su fila hasta el final de la sección
+    for i, ln in enumerate(lines):
+        if is_iva_row_start(ln):
+            win = window_from(i, stop_pred=lambda _: False, max_lines=12)
+            ret_iva = last_non_percent_number(win)
+            break
 
     return float(ret_iva or 0.0), float(ret_gan or 0.0)
 
