@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 from io import BytesIO
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 
 import pandas as pd
+from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
 from openpyxl.utils import get_column_letter
 
@@ -28,17 +29,16 @@ COMPRAS_COLUMNS = [
 ]
 
 
-# Excel formats (ARG: 1.000,00 / alícuota 10,500)
-FMT_AMOUNT = "#.##0,00"
-FMT_ALIQ = "0,000"
-FMT_MONEY = '"$"#.##0,00'
-
-
-def _set_col_widths(ws, df: pd.DataFrame):
-    # ancho simple: basado en header
-    for i, col in enumerate(df.columns, start=1):
-        w = max(10, min(60, len(str(col)) + 2))
-        ws.column_dimensions[get_column_letter(i)].width = w
+def _digits_to_int_or_none(s: str):
+    s = (s or "").strip()
+    if not s:
+        return None
+    if s.isdigit():
+        try:
+            return int(s)
+        except Exception:
+            return s
+    return s
 
 
 def build_ventas_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
@@ -53,26 +53,27 @@ def build_ventas_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
             "Número": l.numero,
             "Razón Social o Denominación Cliente ": (l.comprador.razon_social or "").strip(),
             "Tipo Doc.": 80,
-            "CUIT": (l.comprador.cuit or "").strip(),
+            "CUIT": _digits_to_int_or_none(l.comprador.cuit),
             "Domicilio": (l.comprador.domicilio or "").strip(),
             "C.P.": "",
             "Pcia": "",
             "Cond Fisc": l.comprador.cond_fisc,
             "Cód. Neto": l.cod_neto_venta,
-            "Neto Gravado": float(l.neto or 0),
-            "Alíc.": float(l.alic_iva or 0),
-            "IVA Liquidado": float(l.iva or 0),
-            "IVA Débito": float(l.iva or 0),
+            "Neto Gravado": float(l.neto or 0.0),
+            "Alíc.": float(l.alic_iva or 0.0),          # VALOR 10.5 (no 0.105)
+            "IVA Liquidado": float(l.iva or 0.0),
+            "IVA Débito": float(l.iva or 0.0),
             "Cód. NG/EX": "",
-            "Conceptos NG/EX": "",
+            "Conceptos NG/EX": None,
             "Cód. P/R": "",
-            "Perc./Ret.": "",
+            "Perc./Ret.": None,
             "Pcia P/R": "",
-            "Total": float(l.total or 0),
+            "Total": float(l.total or 0.0),
         })
 
-        # RET IVA: SOLO RA07 (Ganancias ignoradas)
-        if float(l.ret_iva or 0) != 0:
+        # Retención IVA: SOLO RA07 (Ganancias ignoradas)
+        if float(l.ret_iva or 0.0) != 0.0:
+            amt = float(l.ret_iva or 0.0)
             rows.append({
                 "Fecha dd/mm/aaaa": l.fecha,
                 "Cpbte": "RV",
@@ -81,7 +82,7 @@ def build_ventas_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
                 "Número": l.numero,
                 "Razón Social o Denominación Cliente ": (l.comprador.razon_social or "").strip(),
                 "Tipo Doc.": 80,
-                "CUIT": (l.comprador.cuit or "").strip(),
+                "CUIT": _digits_to_int_or_none(l.comprador.cuit),
                 "Domicilio": (l.comprador.domicilio or "").strip(),
                 "C.P.": "",
                 "Pcia": "",
@@ -92,210 +93,222 @@ def build_ventas_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
                 "IVA Liquidado": None,
                 "IVA Débito": None,
                 "Cód. NG/EX": "",
-                "Conceptos NG/EX": "",
+                "Conceptos NG/EX": None,
                 "Cód. P/R": "RA07",
-                "Perc./Ret.": float(l.ret_iva or 0),
+                "Perc./Ret.": amt,
                 "Pcia P/R": "",
-                "Total": float(l.ret_iva or 0),
+                "Total": amt,     # siempre con total
             })
 
     return pd.DataFrame(rows, columns=VENTAS_COLUMNS)
 
 
 def build_cpns_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
-    rows: List[Dict[str, Any]] = []
+    rows = []
     for l in liqs:
-        comprobante = f"{l.pv}-{l.numero}"  # SOLO 3302-29912534
+        pv = (l.pv or "").zfill(4) if (l.pv or "").isdigit() else (l.pv or "")
+        num = (l.numero or "").zfill(8) if (l.numero or "").isdigit() else (l.numero or "")
+        comprobante = f"{pv}-{num}" if pv and num else ""
+
         rows.append({
             "FECHA": l.fecha,
-            "COMPROBANTE": comprobante,
+            "COMPROBANTE": comprobante,  # SOLO 3302-29912534
             "ACOPIO": (l.acopio.razon_social or "").strip(),
-            "CUIT ACOPIO": (l.acopio.cuit or "").strip(),
-            "COMPRADOR": (l.comprador.razon_social or "").strip(),
-            "CUIT COMPRADOR": (l.comprador.cuit or "").strip(),
             "TIPO DE GRANO": l.grano,
             "CAMPAÑA": l.campaña or "",
-            "CANTIDAD DE KILOS": float(l.kilos or 0),
-            "PRECIO": float(l.precio or 0),
-            "NETO": float(l.neto or 0),
-            "IVA": float(l.iva or 0),
-            "TOTAL": float(l.total or 0),
-            "RET IVA": float(l.ret_iva or 0),
-            # sección ME (simple)
+            "CANTIDAD DE KILOS": float(l.kilos or 0.0),
+            "PRECIO": float(l.precio or 0.0),
+            "LOCALIDAD": l.localidad,
             "ME - Nro comprobante": l.me_nro_comprobante,
             "ME - Grado": l.me_grado,
-            "ME - Factor": l.me_factor if l.me_factor is not None else "",
-            "ME - Contenido proteico": l.me_contenido_proteico if l.me_contenido_proteico is not None else "",
-            "ME - Peso (kg)": l.me_peso_kg if l.me_peso_kg is not None else "",
+            "ME - Factor": l.me_factor if l.me_factor is not None else None,
+            "ME - Contenido proteico": l.me_contenido_proteico if l.me_contenido_proteico is not None else None,
             "ME - Procedencia": l.me_procedencia,
+            "ME - Peso (kg)": l.me_peso_kg if l.me_peso_kg is not None else None,
         })
     return pd.DataFrame(rows)
 
 
 def build_gastos_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
     """
-    Modelo compras:
-    - Proveedor = acopio
+    Modelo compras (HWCpra1):
+    - Proveedor = acopio (encabezado)
     - Cpbte = ND
-    - Tipo = letra (A)
-    - Mov (202/203) va en Cód. Neto
-    - Exento va en NG/EX (Cód. NG/EX = 203)
-    - Total SIEMPRE informado
-    - Percepciones (si existieran) irían en Cód. P/R + Perc./Ret. (P007), pero acá no las forzamos
+    - Tipo = A
+    - Tipo de movimiento: 203 por defecto; si IVA 21% => 202
+    - Exento (alíc 0%) puede ir en la misma línea (en NG/EX)
+    - Si hay dos alícuotas (10.5 y 21) => líneas separadas.
     """
     rows: List[Dict[str, Any]] = []
 
     for l in liqs:
         exento_total = 0.0
-        by_alic: Dict[float, List[float]] = {}  # alic -> [neto, iva]
+        by_alic = {}  # alic -> (neto, iva)
 
-        for d in l.deducciones:
-            if float(d.alic or 0) == 0:
+        for d in (l.deducciones or []):
+            alic = float(d.alic or 0.0)
+            if abs(alic) < 0.000001:
                 exento_total += float(d.total if d.total else d.neto)
             else:
-                by_alic.setdefault(float(d.alic), [0.0, 0.0])
-                by_alic[float(d.alic)][0] += float(d.neto or 0)
-                by_alic[float(d.alic)][1] += float(d.iva or 0)
+                by_alic.setdefault(alic, [0.0, 0.0])
+                by_alic[alic][0] += float(d.neto or 0.0)
+                by_alic[alic][1] += float(d.iva or 0.0)
 
         alics_sorted = sorted(by_alic.keys())
-
         if alics_sorted:
             for idx, alic in enumerate(alics_sorted):
                 neto, iva = by_alic[alic]
                 exento_here = exento_total if idx == 0 else 0.0
                 mov = 202 if abs(alic - 21.0) < 0.001 else 203
-                total = float(neto or 0) + float(iva or 0) + float(exento_here or 0)
+                total = (neto or 0.0) + (iva or 0.0) + (exento_here or 0.0)
 
                 rows.append({
                     "Fecha Emisión ": l.fecha,
                     "Fecha Recepción": l.fecha,
                     "Cpbte": "ND",
-                    "Tipo": l.letra,          # A
+                    "Tipo": l.letra,  # A
                     "Suc.": l.pv,
                     "Número": l.numero,
                     "Razón Social/Denominación Proveedor": (l.acopio.razon_social or "").strip(),
                     "Tipo Doc.": 80,
-                    "CUIT": (l.acopio.cuit or "").strip(),
+                    "CUIT": _digits_to_int_or_none(l.acopio.cuit),
                     "Domicilio": (l.acopio.domicilio or "").strip(),
                     "C.P.": "",
                     "Pcia": "",
                     "Cond Fisc": l.acopio.cond_fisc,
                     "Cód. Neto": mov,
-                    "Neto Gravado": float(neto or 0),
-                    "Alíc.": float(alic or 0),
-                    "IVA Liquidado": float(iva or 0),
-                    "IVA Crédito": float(iva or 0),
+                    "Neto Gravado": float(neto or 0.0),
+                    "Alíc.": float(alic or 0.0),
+                    "IVA Liquidado": float(iva or 0.0),
+                    "IVA Crédito": float(iva or 0.0),
                     "Cód. NG/EX": 203 if exento_here else "",
-                    "Conceptos NG/EX": float(exento_here) if exento_here else "",
+                    "Conceptos NG/EX": float(exento_here) if exento_here else None,
                     "Cód. P/R": "",
-                    "Perc./Ret.": "",
+                    "Perc./Ret.": None,
                     "Pcia P/R": "",
-                    "Total": float(total or 0),
+                    "Total": float(total or 0.0),
                 })
         else:
+            # Only exento
             mov = 203
-            total = float(exento_total or 0)
             rows.append({
                 "Fecha Emisión ": l.fecha,
                 "Fecha Recepción": l.fecha,
                 "Cpbte": "ND",
-                "Tipo": l.letra,
+                "Tipo": l.letra,  # A
                 "Suc.": l.pv,
                 "Número": l.numero,
                 "Razón Social/Denominación Proveedor": (l.acopio.razon_social or "").strip(),
                 "Tipo Doc.": 80,
-                "CUIT": (l.acopio.cuit or "").strip(),
+                "CUIT": _digits_to_int_or_none(l.acopio.cuit),
                 "Domicilio": (l.acopio.domicilio or "").strip(),
                 "C.P.": "",
                 "Pcia": "",
                 "Cond Fisc": l.acopio.cond_fisc,
                 "Cód. Neto": mov,
                 "Neto Gravado": 0.0,
-                "Alíc.": "",
+                "Alíc.": None,
                 "IVA Liquidado": 0.0,
                 "IVA Crédito": 0.0,
                 "Cód. NG/EX": 203,
-                "Conceptos NG/EX": float(exento_total or 0),
+                "Conceptos NG/EX": float(exento_total) if exento_total else None,
                 "Cód. P/R": "",
-                "Perc./Ret.": "",
+                "Perc./Ret.": None,
                 "Pcia P/R": "",
-                "Total": total,
+                "Total": float(exento_total or 0.0),
             })
 
     return pd.DataFrame(rows, columns=COMPRAS_COLUMNS)
 
 
-def df_to_xlsx_bytes(
-    df: pd.DataFrame,
-    sheet_name: str,
-    col_formats: Optional[Dict[str, str]] = None,
-) -> bytes:
-    """
-    Escribe XLSX y aplica formatos EXCEL (no strings):
-    - Montos: 1.000,00 => #.##0,00
-    - Alícuotas: 10,500 => 0,000
-    """
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name=sheet_name)
-        ws = writer.book[sheet_name]
+# ------------------------- XLSX with correct formats -------------------------
 
-        bold = Font(bold=True)
-        for cell in ws[1]:
-            cell.font = bold
-            cell.alignment = Alignment(vertical="center")
-        ws.freeze_panes = "A2"
-
-        _set_col_widths(ws, df)
-
-        if col_formats:
-            # map header -> excel number_format
-            header_index = {str(c.value): c.column for c in ws[1]}
-            for col_name, fmt in col_formats.items():
-                if col_name not in header_index:
-                    continue
-                col_idx = header_index[col_name]
-                for r in range(2, ws.max_row + 1):
-                    ws.cell(row=r, column=col_idx).number_format = fmt
-
-    return output.getvalue()
+def _set_col_widths(ws, widths: List[float]):
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
 
 
-def ventas_xlsx_bytes(liqs: List[Liquidacion]) -> bytes:
-    df = build_ventas_rows(liqs)
-    formats = {
-        "Neto Gravado": FMT_AMOUNT,
-        "IVA Liquidado": FMT_AMOUNT,
-        "IVA Débito": FMT_AMOUNT,
-        "Perc./Ret.": FMT_AMOUNT,
-        "Total": FMT_AMOUNT,
-        "Alíc.": FMT_ALIQ,
-    }
-    return df_to_xlsx_bytes(df, "Ventas", formats)
+def df_to_xlsx_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_name
 
+    header_font = Font(bold=True)
+    center = Alignment(vertical="center")
 
-def cpns_xlsx_bytes(liqs: List[Liquidacion]) -> bytes:
-    df = build_cpns_rows(liqs)
-    formats = {
-        "CANTIDAD DE KILOS": FMT_AMOUNT,
-        "PRECIO": FMT_MONEY,
-        "NETO": FMT_AMOUNT,
-        "IVA": FMT_AMOUNT,
-        "TOTAL": FMT_AMOUNT,
-        "RET IVA": FMT_AMOUNT,
-    }
-    return df_to_xlsx_bytes(df, "CPNs", formats)
+    ws.append(list(df.columns))
+    for c in ws[1]:
+        c.font = header_font
+        c.alignment = center
 
+    for row in df.itertuples(index=False, name=None):
+        ws.append(list(row))
 
-def gastos_xlsx_bytes(liqs: List[Liquidacion]) -> bytes:
-    df = build_gastos_rows(liqs)
-    formats = {
-        "Neto Gravado": FMT_AMOUNT,
-        "IVA Liquidado": FMT_AMOUNT,
-        "IVA Crédito": FMT_AMOUNT,
-        "Conceptos NG/EX": FMT_AMOUNT,
-        "Perc./Ret.": FMT_AMOUNT,
-        "Total": FMT_AMOUNT,
-        "Alíc.": FMT_ALIQ,
-    }
-    return df_to_xlsx_bytes(df, "Gastos", formats)
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+
+    col_idx = {name: i + 1 for i, name in enumerate(df.columns)}
+
+    # Detect sheet type by columns
+    cols_set = set(df.columns)
+
+    # Formats
+    fmt_amount = '#,##0.00'
+    fmt_alic = '0.000'
+    fmt_cuit = '0'
+
+    def apply_format(col_name: str, fmt: str):
+        if col_name not in col_idx:
+            return
+        j = col_idx[col_name]
+        for r in range(2, ws.max_row + 1):
+            cell = ws.cell(row=r, column=j)
+            if cell.value is None or cell.value == "":
+                continue
+            cell.number_format = fmt
+
+    # Ventas
+    if set(VENTAS_COLUMNS).issubset(cols_set):
+        for nm in ["Neto Gravado", "IVA Liquidado", "IVA Débito", "Conceptos NG/EX", "Perc./Ret.", "Total"]:
+            apply_format(nm, fmt_amount)
+        apply_format("Alíc.", fmt_alic)
+        apply_format("CUIT", fmt_cuit)
+
+        _set_col_widths(ws, [
+            14, 8, 6, 6, 12, 42, 9, 14, 30, 8, 8, 10,
+            10, 14, 10, 14, 14, 10, 14, 10, 14, 10, 14
+        ])
+
+    # Compras
+    elif set(COMPRAS_COLUMNS).issubset(cols_set):
+        for nm in ["Neto Gravado", "IVA Liquidado", "IVA Crédito", "Conceptos NG/EX", "Perc./Ret.", "Total"]:
+            apply_format(nm, fmt_amount)
+        apply_format("Alíc.", fmt_alic)
+        apply_format("CUIT", fmt_cuit)
+
+        _set_col_widths(ws, [
+            14, 14, 8, 6, 6, 12, 42, 9, 14, 30, 8, 8, 10,
+            10, 14, 10, 14, 14, 10, 14, 10, 14, 10, 14
+        ])
+
+    # CPNs (una sola hoja)
+    else:
+        # aplicar formatos por nombre si existen
+        if "CANTIDAD DE KILOS" in col_idx:
+            apply_format("CANTIDAD DE KILOS", fmt_amount)
+        if "PRECIO" in col_idx:
+            apply_format("PRECIO", '"$"#,##0.00')
+        for nm in ["ME - Factor", "ME - Contenido proteico", "ME - Peso (kg)"]:
+            if nm in col_idx:
+                apply_format(nm, fmt_amount)
+
+        # widths razonables
+        widths = []
+        for i, name in enumerate(df.columns, start=1):
+            widths.append(min(max(len(str(name)) + 2, 12), 45))
+        _set_col_widths(ws, widths)
+
+    out = BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out.getvalue()
