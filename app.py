@@ -1,116 +1,96 @@
-import streamlit as st
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
 import pandas as pd
-from pathlib import Path
-from PIL import Image
+import streamlit as st
 
 from parser import parse_liquidacion_pdf
-from exporters import ventas_xlsx_bytes, cpns_xlsx_bytes, gastos_xlsx_bytes
-
-APP_TITLE = "IA liquidaciones agropecuarias"
-
-ASSETS_DIR = Path(__file__).parent / "assets"
-LOGO_PATH = ASSETS_DIR / "logo_aie.png"
-
-st.set_page_config(
-    page_title=APP_TITLE,
-    page_icon=Image.open(LOGO_PATH) if LOGO_PATH.exists() else None,
-    layout="wide",
+from exporters import (
+    build_ventas_rows,
+    build_cpns_rows,
+    build_gastos_rows,
+    df_to_xlsx_bytes,
 )
 
-c1, c2 = st.columns([1, 6])
-with c1:
-    if LOGO_PATH.exists():
-        st.image(str(LOGO_PATH), use_container_width=True)
-with c2:
-    st.title(APP_TITLE)
+st.set_page_config(page_title="IA Liquidaciones Agropecuarias", layout="wide")
 
-pdf_files = st.file_uploader(
-    "Subí una o más liquidaciones (PDF)",
-    type=["pdf"],
-    accept_multiple_files=True
-)
+st.title("IA Liquidaciones Agropecuarias")
+files = st.file_uploader("Subí una o más liquidaciones (PDF)", type=["pdf"], accept_multiple_files=True)
 
-def fmt_amount(x):
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return ""
+def _fmt_monto(x):
     try:
-        v = float(x)
+        return f"{float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except Exception:
-        return str(x)
-    # 1.000,00
-    return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        return x
 
-def fmt_aliq(x):
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return ""
+def _fmt_alic(x):
     try:
-        v = float(x)
+        return f"{float(x):,.3f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except Exception:
-        return str(x)
-    # 10,500
-    return f"{v:,.3f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        return x
 
-if pdf_files:
+if files:
     liqs = []
-    preview_rows = []
+    for f in files:
+        liqs.append(parse_liquidacion_pdf(f.getvalue(), f.name))
 
-    with st.spinner("Procesando PDFs..."):
-        for uf in pdf_files:
-            data = uf.read()
-            l = parse_liquidacion_pdf(data, filename=uf.name)
-            liqs.append(l)
-
-            preview_rows.append({
-                "Archivo": uf.name,
-                "Fecha": l.fecha,
-                "COE": l.coe,
-                "CUIT Comprador": l.comprador.cuit,
-                "Grano": l.grano,
-                "Campaña": l.campaña,
-                "Kg": l.kilos,
-                "Precio/Kg": l.precio,
-                "Neto": l.neto,
-                "Alic IVA": l.alic_iva,
-                "IVA": l.iva,
-                "Ret IVA": l.ret_iva,   # <- ya viene del cuadro RETENCIONES (monto)
-                "Total": l.total,
-            })
+    # Vista previa (la grilla estaba bien: mantenemos formato visible)
+    preview = pd.DataFrame([{
+        "Archivo": l.filename,
+        "CUIT Comprador": l.comprador.cuit,
+        "Grano": l.grano,
+        "Campaña": l.campaña or "",
+        "Kg": l.kilos,
+        "Precio/Kg": l.precio,
+        "Neto": l.neto,
+        "Alic IVA": l.alic_iva,
+        "IVA": l.iva,
+        "Ret IVA": l.ret_iva,
+        "Ret Gan": l.ret_gan,  # siempre 0 por parser
+        "Total": l.total,
+    } for l in liqs])
 
     st.subheader("Vista previa")
-    df = pd.DataFrame(preview_rows)
+    st.dataframe(
+        preview.style.format({
+            "Kg": _fmt_monto,
+            "Precio/Kg": _fmt_monto,
+            "Neto": _fmt_monto,
+            "Alic IVA": _fmt_alic,
+            "IVA": _fmt_monto,
+            "Ret IVA": _fmt_monto,
+            "Ret Gan": _fmt_monto,
+            "Total": _fmt_monto,
+        }),
+        use_container_width=True
+    )
 
-    df_show = df.copy()
-    for col in ["Kg", "Precio/Kg", "Neto", "IVA", "Ret IVA", "Total"]:
-        if col in df_show.columns:
-            df_show[col] = df_show[col].apply(fmt_amount)
-    if "Alic IVA" in df_show.columns:
-        df_show["Alic IVA"] = df_show["Alic IVA"].apply(fmt_aliq)
+    ventas_df = build_ventas_rows(liqs)
+    cpns_df = build_cpns_rows(liqs)
+    gastos_df = build_gastos_rows(liqs)
 
-    st.dataframe(df_show, use_container_width=True, hide_index=True)
+    c1, c2, c3 = st.columns(3)
 
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
+    with c1:
         st.download_button(
             "Descargar Ventas",
-            data=ventas_xlsx_bytes(liqs),
+            data=df_to_xlsx_bytes(ventas_df, "Ventas"),
             file_name="ventas.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
         )
-    with col2:
+
+    with c2:
         st.download_button(
             "Descargar CPNs",
-            data=cpns_xlsx_bytes(liqs),
+            data=df_to_xlsx_bytes(cpns_df, "CPNs"),
             file_name="cpns.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
         )
-    with col3:
+
+    with c3:
         st.download_button(
             "Descargar Gastos",
-            data=gastos_xlsx_bytes(liqs),
+            data=df_to_xlsx_bytes(gastos_df, "Gastos"),
             file_name="gastos.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
         )
