@@ -1,119 +1,122 @@
-import streamlit as st
-import pandas as pd
-from pathlib import Path
-from PIL import Image
+from __future__ import annotations
 
-from src.parser_liquidaciones import parse_liquidacion_pdf
-from src.export_ventas import build_excel_ventas
-from src.export_cpns import build_excel_cpns
-from src.export_gastos import build_excel_gastos
+from io import BytesIO
+from typing import List
 
-APP_TITLE = "IA liquidaciones agropecuarias"
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment
+from openpyxl.utils import get_column_letter
 
-ASSETS_DIR = Path(__file__).parent / "assets"
-LOGO_PATH = ASSETS_DIR / "logo_aie.png"
+from .models import LiquidacionDoc, MercaderiaEntregadaItem
 
 
-st.set_page_config(
-    page_title=APP_TITLE,
-    page_icon=Image.open(LOGO_PATH) if LOGO_PATH.exists() else None,
-    layout="wide",
-)
+def _set_col_widths(ws, widths):
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
 
-c1, c2 = st.columns([1, 6])
-with c1:
-    if LOGO_PATH.exists():
-        st.image(str(LOGO_PATH), use_container_width=True)
-with c2:
-    st.title(APP_TITLE)
 
-pdf_files = st.file_uploader(
-    "Subí una o más liquidaciones (PDF)",
-    type=["pdf"],
-    accept_multiple_files=True
-)
+def build_excel_cpns(docs: List[LiquidacionDoc]) -> BytesIO:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "CPNs"
 
-if pdf_files:
-    parsed = []
-    preview_rows = []
+    # Hoja principal (CPNs)
+    headers = [
+        "Fecha",
+        "COE",
+        "Comprobante",      # SOLO 3302-29912534
+        "Acopio/Comprador",
+        "CUIT Comprador",
+        "Tipo de grano",
+        "Campaña",
+        "Kilos",
+        "Precio",           # formato $
+        "Subtotal",
+        "IVA",
+        "Total",
+    ]
+    ws.append(headers)
 
-    with st.spinner("Procesando PDFs..."):
-        for uf in pdf_files:
-            data = uf.read()
-            doc = parse_liquidacion_pdf(data, filename=uf.name)
-            parsed.append(doc)
+    bold = Font(bold=True)
+    for cell in ws[1]:
+        cell.font = bold
+        cell.alignment = Alignment(vertical="center")
+    ws.freeze_panes = "A2"
 
-            preview_rows.append({
-                "Archivo": uf.name,
-                "Fecha": doc.fecha,
-                "Localidad": doc.localidad,
-                "COE": doc.coe,
-                "Tipo": doc.tipo_comprobante,
-                "Acopio/Comprador": doc.comprador_rs,
-                "CUIT Comprador": doc.comprador_cuit,
-                "Grano": doc.grano,
-                "Kg": doc.kilos,
-                "Precio/Kg": doc.precio_kg,
-                "Subtotal": doc.subtotal,
-                "Alic IVA": doc.alicuota_iva,
-                "IVA": doc.iva,
-                "Total": doc.total,
-                "Ret IVA": doc.ret_iva,
-                "Ret Gan": doc.ret_gan,
-            })
+    for d in docs:
+        row = [
+            d.fecha or "",
+            d.coe or "",
+            d.comprobante or "",
+            d.comprador_rs or "",
+            (d.comprador_cuit or "").replace("-", ""),
+            d.grano or "",
+            d.campaña or "",
+            float(d.kilos or 0),
+            float(d.precio_kg or 0),
+            float(d.subtotal or 0),
+            float(d.iva or 0),
+            float(d.total or 0),
+        ]
+        ws.append(row)
 
-    st.subheader("Vista previa")
-    df = pd.DataFrame(preview_rows)
+    # Formatos CPNs
+    col_idx = {h: i + 1 for i, h in enumerate(headers)}
+    for r in range(2, ws.max_row + 1):
+        ws.cell(row=r, column=col_idx["Kilos"]).number_format = '#,##0.00'
+        ws.cell(row=r, column=col_idx["Precio"]).number_format = '"$"#,##0.00'
+        ws.cell(row=r, column=col_idx["Subtotal"]).number_format = '#,##0.00'
+        ws.cell(row=r, column=col_idx["IVA"]).number_format = '#,##0.00'
+        ws.cell(row=r, column=col_idx["Total"]).number_format = '#,##0.00'
+        ws.cell(row=r, column=col_idx["CUIT Comprador"]).number_format = "0"
 
-    def fmt_amount(x):
-        if x is None or (isinstance(x, float) and pd.isna(x)):
-            return ""
-        if isinstance(x, (int, float)):
-            return f"{x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-        return x
+    _set_col_widths(ws, [12, 14, 16, 40, 14, 18, 12, 12, 12, 14, 14, 14])
 
-    def fmt_aliq(x):
-        if x is None or (isinstance(x, float) and pd.isna(x)):
-            return ""
-        if isinstance(x, (int, float)):
-            return f"{x:,.3f}".replace(",", "X").replace(".", ",").replace("X", ".")
-        return x
+    # Hoja Mercadería Entregada
+    ws2 = wb.create_sheet("Mercadería Entregada")
+    headers2 = [
+        "Fecha",
+        "Nro Comprobante",   # repetir aquí
+        "Acopio/Comprador",
+        "Tipo de grano",
+        "Campaña",
+        "Kilos",
+        "Precio",            # $
+        "Observación",
+    ]
+    ws2.append(headers2)
+    for cell in ws2[1]:
+        cell.font = bold
+        cell.alignment = Alignment(vertical="center")
+    ws2.freeze_panes = "A2"
 
-    df_show = df.copy()
-    for col in ["Kg","Precio/Kg","Subtotal","IVA","Total","Ret IVA","Ret Gan"]:
-        if col in df_show.columns:
-            df_show[col] = df_show[col].apply(fmt_amount)
-    if "Alic IVA" in df_show.columns:
-        df_show["Alic IVA"] = df_show["Alic IVA"].apply(fmt_aliq)
+    for d in docs:
+        items: List[MercaderiaEntregadaItem] = d.mercaderia_entregada or []
+        if not items:
+            # si no hay sección detectada, igual podés querer un renglón base
+            continue
 
-    st.dataframe(df_show, use_container_width=True, hide_index=True)
+        for it in items:
+            ws2.append([
+                it.fecha or d.fecha or "",
+                d.comprobante or "",
+                d.comprador_rs or "",
+                it.grano or d.grano or "",
+                it.campaña or d.campaña or "",
+                float(it.kilos or 0),
+                float(it.precio or d.precio_kg or 0),
+                it.observacion or "",
+            ])
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        out = build_excel_ventas(parsed)
-        st.download_button(
-            "Descargar Ventas",
-            data=out.getvalue(),
-            file_name="ventas.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
-    with col2:
-        out = build_excel_cpns(parsed)
-        st.download_button(
-            "Descargar CPNs",
-            data=out.getvalue(),
-            file_name="cpns.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
-    with col3:
-        out = build_excel_gastos(parsed)
-        st.download_button(
-            "Descargar Gastos",
-            data=out.getvalue(),
-            file_name="gastos.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
+    # formatos
+    col_idx2 = {h: i + 1 for i, h in enumerate(headers2)}
+    for r in range(2, ws2.max_row + 1):
+        ws2.cell(row=r, column=col_idx2["Kilos"]).number_format = '#,##0.00'
+        ws2.cell(row=r, column=col_idx2["Precio"]).number_format = '"$"#,##0.00'
 
+    _set_col_widths(ws2, [12, 16, 40, 18, 12, 12, 12, 28])
+
+    out = BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out
