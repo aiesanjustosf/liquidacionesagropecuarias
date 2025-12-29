@@ -442,32 +442,24 @@ def _extract_percepcion_iva(full_text: str) -> float:
 
 def _extract_retenciones(page_text: str) -> Tuple[float, float]:
     """
-    Lee la tabla de RETENCIONES y toma el MONTO de la columna 'Retenciones'.
-
-    Regla robusta:
-      - Dentro del bloque RETENCIONES, para cada fila buscamos el patrón:  <alícuota%> <monto>
-        (con o sin '$'), y tomamos el ÚLTIMO par %->monto de la fila (porque puede haber 0% y luego 5%).
-      - Si no hay retenciones o no aparece la fila, devuelve 0.0.
-      - Ganancias se devuelve solo si se detecta su fila; si el monto es 0, queda 0.
-
-    Evita:
-      - tomar la BASE CÁLCULO
-      - tomar la ALÍCUOTA (5%)
-      - tomar totales fuera de la tabla
+    Definitivo (tabla RETENCIONES):
+    - ret_iva: monto de la columna 'Retenciones' en la fila RET IVA (monto después del %)
+    - ret_gan: monto de la columna 'Retenciones' en la fila RET GAN (monto después del %)
+    Si no hay retenciones, devuelve 0.0 / 0.0.
     """
+
     up = (page_text or "").upper()
     s = up.find("RETENCIONES")
     if s == -1:
         return 0.0, 0.0
 
-    # Cortar la sección para no contaminar con totales del resumen
+    # Cortar la sección para no contaminar con "Importes Totales", etc.
     stop_candidates = [
-        up.find("OTROS", s),
         up.find("GRADO", s),
         up.find("CONDICIONES", s),
+        up.find("MERCADERIA ENTREGADA", s),
+        up.find("MERCADERÍA ENTREGADA", s),
         up.find("IMPORTES TOTALES", s),
-        up.find("IMPORTES TOTALES DE LA LIQUIDACIÓN", s),
-        up.find("IMPORTES TOTALES DE LA LIQUIDACION", s),
         up.find("OPERACIÓN", s),
         up.find("OPERACION", s),
     ]
@@ -475,78 +467,83 @@ def _extract_retenciones(page_text: str) -> Tuple[float, float]:
     e = min(stop_candidates) if stop_candidates else len(page_text)
 
     sec = page_text[s:e]
-    lines = [ln.strip() for ln in sec.splitlines() if ln.strip()]
 
-    def nrm(x: str) -> str:
-        return _norm(x)
+    # Normalizar espacios para que el regex cruce saltos de línea
+    sec1 = re.sub(r"[ \t]+", " ", sec)
+    sec1 = re.sub(r"\n+", "\n", sec1)
 
-    def extract_ret_amount_from_text(txt: str) -> float:
+    def extract_after_percent(block: str) -> float:
         """
-        Extrae el monto de 'Retenciones' de una fila:
-        - busca pares "<porcentaje>% <monto>" (con o sin $)
-        - toma el ÚLTIMO par encontrado (ej: "0% 0.00 ... 5% 365,476.32" => 365,476.32)
+        Dentro de un bloque (fila), toma el monto que aparece después del %.
+        Si hay más de un par (ej 0% ... 5%), toma el último par %->monto.
         """
-        # Normalizar para que el regex cruce saltos de línea
-        t = re.sub(r"\s+", " ", txt)
+        t = re.sub(r"\s+", " ", block)
 
-        pairs = re.findall(r"(\d[\d.,]*)\s*%\s*\$?\s*([-]?\d[\d.,]*)", t)
+        # pares: <porcentaje>% <monto> (con o sin $)
+        pairs = re.findall(r"(\d[\d.,]*)\s*%\s*\$?\s*([-]?\d[\d.,]*)", t, flags=re.IGNORECASE)
         if pairs:
-            last_amt = pairs[-1][1]
-            v = parse_number(last_amt)
+            # tomar el último par (cubre caso: 0% ... 5% ...)
+            amt = pairs[-1][1]
+            v = parse_number(amt)
             return float(v or 0.0)
 
-        # Fallback: si no hay %->monto, tomar el último monto con '$'
-        ms = re.findall(r"\$\s*([-]?\d[\d.,]*)", t)
-        if ms:
-            v = parse_number(ms[-1])
-            return float(v or 0.0)
-
-        # Último fallback: último número "grande" de la fila (evita quedarse con %)
-        nums = re.findall(r"[-]?\d[\d.,]*", t)
-        for tok in reversed(nums):
-            v = parse_number(tok)
-            if v is None:
-                continue
-            # evitar devolver una alícuota típica
-            if abs(v) in (0.0, 5.0, 10.5, 21.0, 27.0):
-                continue
-            return float(v)
         return 0.0
 
-    def is_start_iva(ln_norm: str) -> bool:
-        # Detecta la fila de IVA dentro de la tabla de retenciones
-        return ("IVA" in ln_norm or "I V A" in ln_norm or "I.V.A" in ln_norm) and ("RET" in ln_norm or "RETENC" in ln_norm)
+    def row_block_by_detail(detail_key: str) -> str:
+        """
+        Aísla un 'bloque de fila' desde donde aparece el detalle (RET IVA / RET GAN)
+        hasta antes de la siguiente fila o hasta el fin de sección.
+        """
+        # índice del match del detalle
+        m = re.search(re.escape(detail_key), sec1, flags=re.IGNORECASE)
+        if not m:
+            return ""
 
-    def is_start_gan(ln_norm: str) -> bool:
-        return "GANANC" in ln_norm and ("RET" in ln_norm or "RETENC" in ln_norm)
+        start = max(0, m.start() - 80)  # incluir el concepto (I.V.A. / Ganancias) si quedó antes
+        tail = sec1[m.start():]
 
-    def is_start_other_row(ln_norm: str) -> bool:
-        # inicio de otra fila/concepto que corta la ventana
-        return ln_norm.startswith("OTROS") or "GRAVAMEN" in ln_norm or "GRAVÁMEN" in ln_norm
+        # cortar cuando arranque otra fila típica o cuando aparezca el header de otra sección
+        cutters = [
+            re.search(r"\bRET\s+IVA\b", tail, flags=re.IGNORECASE),
+            re.search(r"\bRET\s+GAN\b", tail, flags=re.IGNORECASE),
+            re.search(r"\bGRADO\b", tail, flags=re.IGNORECASE),
+            re.search(r"\bCONDICIONES\b", tail, flags=re.IGNORECASE),
+            re.search(r"\bIMPORTES TOTALES\b", tail, flags=re.IGNORECASE),
+        ]
 
-    def take_row_block(start_idx: int) -> str:
-        # arma bloque de fila (porque suele venir partida en 2-3 líneas)
-        parts = [lines[start_idx]]
-        for j in range(start_idx + 1, min(len(lines), start_idx + 10)):
-            nj = nrm(lines[j])
-            if is_start_iva(nj) or is_start_gan(nj) or is_start_other_row(nj):
-                break
-            parts.append(lines[j])
-        return " ".join(parts)
+        # Queremos cortar en la *siguiente* ocurrencia del otro detalle (no en la primera que es este)
+        # así que hacemos una búsqueda manual por posiciones.
+        def next_pos(pattern: str, text: str) -> Optional[int]:
+            it = list(re.finditer(pattern, text, flags=re.IGNORECASE))
+            if len(it) <= 1:
+                return None
+            return it[1].start()
 
-    ret_iva = 0.0
-    ret_gan = 0.0
+        nxt = []
+        nxt_iva = next_pos(r"\bRET\s+IVA\b", tail)
+        nxt_gan = next_pos(r"\bRET\s+GAN\b", tail)
+        if nxt_iva is not None:
+            nxt.append(nxt_iva)
+        if nxt_gan is not None:
+            nxt.append(nxt_gan)
 
-    for i, ln in enumerate(lines):
-        ln_norm = nrm(ln)
-        if is_start_gan(ln_norm) and ret_gan == 0.0:
-            block = take_row_block(i)
-            ret_gan = extract_ret_amount_from_text(block)
-        if is_start_iva(ln_norm) and ret_iva == 0.0:
-            block = take_row_block(i)
-            ret_iva = extract_ret_amount_from_text(block)
+        # También cortar por secciones siguientes
+        for pat in [r"\bGRADO\b", r"\bCONDICIONES\b", r"\bIMPORTES TOTALES\b"]:
+            mm = re.search(pat, tail, flags=re.IGNORECASE)
+            if mm:
+                nxt.append(mm.start())
 
-    # Si la fila de Ganancias existe pero viene 0, queda 0 (y el export no debe generar línea)
+        end_rel = min(nxt) if nxt else len(tail)
+        return sec1[start:m.start()] + tail[:end_rel]
+
+    # IVA: buscar por detalle RET IVA (SISA u otros)
+    iva_block = row_block_by_detail("RET IVA")
+    ret_iva = extract_after_percent(iva_block) if iva_block else 0.0
+
+    # Ganancias: solo si existe RET GAN
+    gan_block = row_block_by_detail("RET GAN")
+    ret_gan = extract_after_percent(gan_block) if gan_block else 0.0
+
     return float(ret_iva or 0.0), float(ret_gan or 0.0)
 
 
