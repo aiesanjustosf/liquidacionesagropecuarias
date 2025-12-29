@@ -1,529 +1,301 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from dataclasses import dataclass
 from io import BytesIO
-import re
-import unicodedata
-from typing import List, Optional, Tuple
+from typing import List, Dict, Any, Optional
 
-import pdfplumber
+import pandas as pd
+from openpyxl.styles import Font, Alignment
+from openpyxl.utils import get_column_letter
 
-
-# ------------------------- Helpers -------------------------
-
-def _norm(s: str) -> str:
-    """Uppercase, remove accents, normalize spaces."""
-    if s is None:
-        return ""
-    s = s.strip()
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(ch for ch in s if not unicodedata.combining(ch))
-    s = s.upper()
-    s = re.sub(r"\s+", " ", s)
-    return s
+from parser import Liquidacion
 
 
-def parse_number(raw: str) -> Optional[float]:
+VENTAS_COLUMNS = [
+    "Fecha dd/mm/aaaa","Cpbte","Tipo","Suc.","Número",
+    "Razón Social o Denominación Cliente ",
+    "Tipo Doc.","CUIT","Domicilio","C.P.","Pcia","Cond Fisc",
+    "Cód. Neto","Neto Gravado","Alíc.","IVA Liquidado","IVA Débito",
+    "Cód. NG/EX","Conceptos NG/EX","Cód. P/R","Perc./Ret.","Pcia P/R","Total"
+]
+
+COMPRAS_COLUMNS = [
+    "Fecha Emisión ","Fecha Recepción","Cpbte","Tipo","Suc.","Número",
+    "Razón Social/Denominación Proveedor",
+    "Tipo Doc.","CUIT","Domicilio","C.P.","Pcia","Cond Fisc",
+    "Cód. Neto","Neto Gravado","Alíc.","IVA Liquidado","IVA Crédito",
+    "Cód. NG/EX","Conceptos NG/EX","Cód. P/R","Perc./Ret.","Pcia P/R","Total"
+]
+
+
+# Excel formats (ARG: 1.000,00 / alícuota 10,500)
+FMT_AMOUNT = "#.##0,00"
+FMT_ALIQ = "0,000"
+FMT_MONEY = '"$"#.##0,00'
+
+
+def _set_col_widths(ws, df: pd.DataFrame):
+    # ancho simple: basado en header
+    for i, col in enumerate(df.columns, start=1):
+        w = max(10, min(60, len(str(col)) + 2))
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+
+def build_ventas_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+
+    for l in liqs:
+        rows.append({
+            "Fecha dd/mm/aaaa": l.fecha,
+            "Cpbte": l.tipo_cbte,          # F1/F2
+            "Tipo": l.letra,              # A
+            "Suc.": l.pv,
+            "Número": l.numero,
+            "Razón Social o Denominación Cliente ": (l.comprador.razon_social or "").strip(),
+            "Tipo Doc.": 80,
+            "CUIT": (l.comprador.cuit or "").strip(),
+            "Domicilio": (l.comprador.domicilio or "").strip(),
+            "C.P.": "",
+            "Pcia": "",
+            "Cond Fisc": l.comprador.cond_fisc,
+            "Cód. Neto": l.cod_neto_venta,
+            "Neto Gravado": float(l.neto or 0),
+            "Alíc.": float(l.alic_iva or 0),
+            "IVA Liquidado": float(l.iva or 0),
+            "IVA Débito": float(l.iva or 0),
+            "Cód. NG/EX": "",
+            "Conceptos NG/EX": "",
+            "Cód. P/R": "",
+            "Perc./Ret.": "",
+            "Pcia P/R": "",
+            "Total": float(l.total or 0),
+        })
+
+        # RET IVA: SOLO RA07 (Ganancias ignoradas)
+        if float(l.ret_iva or 0) != 0:
+            rows.append({
+                "Fecha dd/mm/aaaa": l.fecha,
+                "Cpbte": "RV",
+                "Tipo": l.letra,
+                "Suc.": l.pv,
+                "Número": l.numero,
+                "Razón Social o Denominación Cliente ": (l.comprador.razon_social or "").strip(),
+                "Tipo Doc.": 80,
+                "CUIT": (l.comprador.cuit or "").strip(),
+                "Domicilio": (l.comprador.domicilio or "").strip(),
+                "C.P.": "",
+                "Pcia": "",
+                "Cond Fisc": l.comprador.cond_fisc,
+                "Cód. Neto": "",
+                "Neto Gravado": None,
+                "Alíc.": None,
+                "IVA Liquidado": None,
+                "IVA Débito": None,
+                "Cód. NG/EX": "",
+                "Conceptos NG/EX": "",
+                "Cód. P/R": "RA07",
+                "Perc./Ret.": float(l.ret_iva or 0),
+                "Pcia P/R": "",
+                "Total": float(l.ret_iva or 0),
+            })
+
+    return pd.DataFrame(rows, columns=VENTAS_COLUMNS)
+
+
+def build_cpns_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    for l in liqs:
+        comprobante = f"{l.pv}-{l.numero}"  # SOLO 3302-29912534
+        rows.append({
+            "FECHA": l.fecha,
+            "COMPROBANTE": comprobante,
+            "ACOPIO": (l.acopio.razon_social or "").strip(),
+            "CUIT ACOPIO": (l.acopio.cuit or "").strip(),
+            "COMPRADOR": (l.comprador.razon_social or "").strip(),
+            "CUIT COMPRADOR": (l.comprador.cuit or "").strip(),
+            "TIPO DE GRANO": l.grano,
+            "CAMPAÑA": l.campaña or "",
+            "CANTIDAD DE KILOS": float(l.kilos or 0),
+            "PRECIO": float(l.precio or 0),
+            "NETO": float(l.neto or 0),
+            "IVA": float(l.iva or 0),
+            "TOTAL": float(l.total or 0),
+            "RET IVA": float(l.ret_iva or 0),
+            # sección ME (simple)
+            "ME - Nro comprobante": l.me_nro_comprobante,
+            "ME - Grado": l.me_grado,
+            "ME - Factor": l.me_factor if l.me_factor is not None else "",
+            "ME - Contenido proteico": l.me_contenido_proteico if l.me_contenido_proteico is not None else "",
+            "ME - Peso (kg)": l.me_peso_kg if l.me_peso_kg is not None else "",
+            "ME - Procedencia": l.me_procedencia,
+        })
+    return pd.DataFrame(rows)
+
+
+def build_gastos_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
     """
-    Parse numbers that may be:
-    - 2,585.00 (US)
-    - 27,14 (EU)
-    - 2585000.00
+    Modelo compras:
+    - Proveedor = acopio
+    - Cpbte = ND
+    - Tipo = letra (A)
+    - Mov (202/203) va en Cód. Neto
+    - Exento va en NG/EX (Cód. NG/EX = 203)
+    - Total SIEMPRE informado
+    - Percepciones (si existieran) irían en Cód. P/R + Perc./Ret. (P007), pero acá no las forzamos
     """
-    if raw is None:
-        return None
-    s = str(raw).strip()
-    if not s:
-        return None
+    rows: List[Dict[str, Any]] = []
 
-    s = re.sub(r"[^0-9\-,.]", "", s)
-    if not s or s in {".", ",", "-", "-.", "-,"}:
-        return None
+    for l in liqs:
+        exento_total = 0.0
+        by_alic: Dict[float, List[float]] = {}  # alic -> [neto, iva]
 
-    if "," in s and "." in s:
-        last_comma = s.rfind(",")
-        last_dot = s.rfind(".")
-        if last_dot > last_comma:
-            s = s.replace(",", "")
+        for d in l.deducciones:
+            if float(d.alic or 0) == 0:
+                exento_total += float(d.total if d.total else d.neto)
+            else:
+                by_alic.setdefault(float(d.alic), [0.0, 0.0])
+                by_alic[float(d.alic)][0] += float(d.neto or 0)
+                by_alic[float(d.alic)][1] += float(d.iva or 0)
+
+        alics_sorted = sorted(by_alic.keys())
+
+        if alics_sorted:
+            for idx, alic in enumerate(alics_sorted):
+                neto, iva = by_alic[alic]
+                exento_here = exento_total if idx == 0 else 0.0
+                mov = 202 if abs(alic - 21.0) < 0.001 else 203
+                total = float(neto or 0) + float(iva or 0) + float(exento_here or 0)
+
+                rows.append({
+                    "Fecha Emisión ": l.fecha,
+                    "Fecha Recepción": l.fecha,
+                    "Cpbte": "ND",
+                    "Tipo": l.letra,          # A
+                    "Suc.": l.pv,
+                    "Número": l.numero,
+                    "Razón Social/Denominación Proveedor": (l.acopio.razon_social or "").strip(),
+                    "Tipo Doc.": 80,
+                    "CUIT": (l.acopio.cuit or "").strip(),
+                    "Domicilio": (l.acopio.domicilio or "").strip(),
+                    "C.P.": "",
+                    "Pcia": "",
+                    "Cond Fisc": l.acopio.cond_fisc,
+                    "Cód. Neto": mov,
+                    "Neto Gravado": float(neto or 0),
+                    "Alíc.": float(alic or 0),
+                    "IVA Liquidado": float(iva or 0),
+                    "IVA Crédito": float(iva or 0),
+                    "Cód. NG/EX": 203 if exento_here else "",
+                    "Conceptos NG/EX": float(exento_here) if exento_here else "",
+                    "Cód. P/R": "",
+                    "Perc./Ret.": "",
+                    "Pcia P/R": "",
+                    "Total": float(total or 0),
+                })
         else:
-            s = s.replace(".", "").replace(",", ".")
-    elif "," in s and "." not in s:
-        if re.search(r",\d{1,3}$", s):
-            s = s.replace(".", "").replace(",", ".")
-        else:
-            s = s.replace(",", "")
-    else:
-        s = s.replace(",", "")
+            mov = 203
+            total = float(exento_total or 0)
+            rows.append({
+                "Fecha Emisión ": l.fecha,
+                "Fecha Recepción": l.fecha,
+                "Cpbte": "ND",
+                "Tipo": l.letra,
+                "Suc.": l.pv,
+                "Número": l.numero,
+                "Razón Social/Denominación Proveedor": (l.acopio.razon_social or "").strip(),
+                "Tipo Doc.": 80,
+                "CUIT": (l.acopio.cuit or "").strip(),
+                "Domicilio": (l.acopio.domicilio or "").strip(),
+                "C.P.": "",
+                "Pcia": "",
+                "Cond Fisc": l.acopio.cond_fisc,
+                "Cód. Neto": mov,
+                "Neto Gravado": 0.0,
+                "Alíc.": "",
+                "IVA Liquidado": 0.0,
+                "IVA Crédito": 0.0,
+                "Cód. NG/EX": 203,
+                "Conceptos NG/EX": float(exento_total or 0),
+                "Cód. P/R": "",
+                "Perc./Ret.": "",
+                "Pcia P/R": "",
+                "Total": total,
+            })
 
-    try:
-        return float(s)
-    except Exception:
-        return None
-
-
-def parse_cuit_digits(raw: str) -> str:
-    if raw is None:
-        return ""
-    s = str(raw)
-
-    m = re.search(r"\b(\d{2})\D?(\d{8})\D?(\d)\b", s)
-    if m:
-        return f"{m.group(1)}{m.group(2)}{m.group(3)}"
-
-    m2 = re.search(r"\b(\d{11})\b", s)
-    if m2:
-        return m2.group(1)
-
-    d = re.sub(r"\D", "", s)
-    return d[:11] if len(d) >= 11 else d
-
-
-# ------------------------- Domain -------------------------
-
-@dataclass
-class Party:
-    razon_social: str = ""
-    domicilio: str = ""
-    localidad: str = ""
-    cuit: str = ""
-    iva: str = ""
-
-    @property
-    def cond_fisc(self) -> str:
-        v = _norm(self.iva)
-        if "RI" in v or "RESP" in v:
-            return "RI"
-        if "EX" in v:
-            return "EX"
-        if "CF" in v or "CONSUMIDOR" in v:
-            return "CF"
-        return self.iva.strip() if self.iva else ""
+    return pd.DataFrame(rows, columns=COMPRAS_COLUMNS)
 
 
-@dataclass
-class DeductionLine:
-    concepto: str
-    neto: float
-    alic: float
-    iva: float
-    total: float
+def df_to_xlsx_bytes(
+    df: pd.DataFrame,
+    sheet_name: str,
+    col_formats: Optional[Dict[str, str]] = None,
+) -> bytes:
+    """
+    Escribe XLSX y aplica formatos EXCEL (no strings):
+    - Montos: 1.000,00 => #.##0,00
+    - Alícuotas: 10,500 => 0,000
+    """
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+        ws = writer.book[sheet_name]
 
+        bold = Font(bold=True)
+        for cell in ws[1]:
+            cell.font = bold
+            cell.alignment = Alignment(vertical="center")
+        ws.freeze_panes = "A2"
 
-@dataclass
-class Liquidacion:
-    filename: str
-    fecha: str
-    localidad: str
-    tipo_cbte: str   # F1/F2
-    letra: str       # A
-    coe: str
-    pv: str
-    numero: str
-    acopio: Party
-    comprador: Party
-    vendedor: Party
-    grano: str
-    cod_neto_venta: str
-    kilos: float
-    precio: float
-    neto: float
-    alic_iva: float
-    iva: float
-    total: float
-    campaña: str
-    # MERCADERIA ENTREGADA (simple; si luego querés lista, lo ampliamos)
-    me_nro_comprobante: str
-    me_grado: str
-    me_factor: Optional[float]
-    me_contenido_proteico: Optional[float]
-    me_peso_kg: Optional[float]
-    me_procedencia: str
-    # RETENCIONES
-    ret_iva: float
-    ret_gan: float
-    deducciones: List[DeductionLine]
+        _set_col_widths(ws, df)
 
-
-# ------------------------- Parsing -------------------------
-
-GRAIN_CODES = {
-    "SOJA": "123",
-    "MAIZ": "124",
-    "TRIGO": "161",
-    "GIRASOL": "157",
-    "ARVEJA": "120",
-    "SORGO": "151",
-    "CAMELINA SATIVA": "162",
-}
-
-
-def _detect_tipo_cbte(full_text_norm: str) -> str:
-    if "LIQUIDACION SECUNDARIA" in full_text_norm:
-        return "F2"
-    return "F1"
-
-
-def _extract_header_date_loc(page_text: str) -> Tuple[str, str]:
-    m = re.search(r"(\d{2}/\d{2}/\d{4})\s*[,–\-]\s*([^\n]+)", page_text)
-    if m:
-        return m.group(1).strip(), m.group(2).strip()
-    m2 = re.search(r"(\d{2}/\d{2}/\d{4})", page_text)
-    return (m2.group(1) if m2 else ""), ""
-
-
-def _party_from_text(side_text: str) -> Party:
-    if not side_text:
-        return Party()
-    txt = side_text.replace("\r", "\n")
-    lines = [l.strip() for l in txt.split("\n") if l.strip()]
-
-    def _take_multiline_value(label_regex: str, stop_regex: str) -> str:
-        for i, ln in enumerate(lines):
-            m = re.search(label_regex, ln, flags=re.IGNORECASE)
-            if not m:
-                continue
-            val = (m.group(1) or "").strip()
-            j = i + 1
-            while j < len(lines):
-                ln2 = lines[j]
-                if re.search(stop_regex, ln2, flags=re.IGNORECASE):
-                    break
-                if re.search(r"\bRaz[oó]n\s+Social\b\s*:", ln2, flags=re.IGNORECASE):
-                    break
-                if re.search(r"\bDomicilio\b\s*:", ln2, flags=re.IGNORECASE):
-                    break
-                if re.search(r"\bC\.U\.I\.T\b", ln2, flags=re.IGNORECASE):
-                    break
-                if re.search(r"\bI\.V\.A\b", ln2, flags=re.IGNORECASE):
-                    break
-                if ":" not in ln2:
-                    val = (val + " " + ln2).strip() if val else ln2
-                    j += 1
+        if col_formats:
+            # map header -> excel number_format
+            header_index = {str(c.value): c.column for c in ws[1]}
+            for col_name, fmt in col_formats.items():
+                if col_name not in header_index:
                     continue
-                break
-            return re.sub(r"\s+", " ", val).strip()
-        return ""
+                col_idx = header_index[col_name]
+                for r in range(2, ws.max_row + 1):
+                    ws.cell(row=r, column=col_idx).number_format = fmt
 
-    razon = _take_multiline_value(
-        r"Raz[oó]n\s+Social\s*:\s*(.*)$",
-        r"^(Domicilio|Localidad|C\.U\.I\.T|I\.V\.A|IIBB|Ingresos\s+Brutos)\b",
-    )
-    domicilio = _take_multiline_value(
-        r"Domicilio\s*:\s*(.*)$",
-        r"^(Localidad|C\.U\.I\.T|I\.V\.A|IIBB|Ingresos\s+Brutos)\b",
-    )
-
-    def _rgx_first(pat: str) -> str:
-        m = re.search(pat, txt, flags=re.IGNORECASE)
-        return m.group(1).strip() if m else ""
-
-    localidad = _rgx_first(r"Localidad\s*:\s*([^\n]+)")
-    cuit = parse_cuit_digits(_rgx_first(r"C\.U\.I\.T\.?\s*:?\s*([^\n]+)"))
-    iva = _rgx_first(r"I\.V\.A\.?\s*:?\s*([^\n]+)")
-
-    def _cut_at_labels(v: str) -> str:
-        v2 = (v or "").strip()
-        if not v2:
-            return ""
-        for lab in ["RAZON SOCIAL", "DOMICILIO", "C.U.I.T", "I.V.A", "LOCALIDAD"]:
-            idx = _norm(v2).find(lab)
-            if idx > 0:
-                v2 = v2[:idx].strip()
-        return re.sub(r"\s+", " ", v2).strip()
-
-    razon = _cut_at_labels(razon)
-    domicilio = _cut_at_labels(domicilio)
-
-    return Party(razon_social=razon, domicilio=domicilio, localidad=localidad, cuit=cuit, iva=iva)
+    return output.getvalue()
 
 
-def _group_words_to_lines(words: List[dict]) -> List[str]:
-    if not words:
-        return []
-    ws = sorted(words, key=lambda w: (w.get("top", 0), w.get("x0", 0)))
-    lines: List[List[str]] = []
-    current: List[str] = []
-    current_top = ws[0].get("top", 0)
-
-    def flush():
-        nonlocal current
-        if current:
-            lines.append(current)
-            current = []
-
-    for w in ws:
-        top = w.get("top", 0)
-        if abs(top - current_top) > 3:
-            flush()
-            current_top = top
-        current.append(w.get("text", ""))
-    flush()
-    return [" ".join(l).strip() for l in lines if " ".join(l).strip()]
+def ventas_xlsx_bytes(liqs: List[Liquidacion]) -> bytes:
+    df = build_ventas_rows(liqs)
+    formats = {
+        "Neto Gravado": FMT_AMOUNT,
+        "IVA Liquidado": FMT_AMOUNT,
+        "IVA Débito": FMT_AMOUNT,
+        "Perc./Ret.": FMT_AMOUNT,
+        "Total": FMT_AMOUNT,
+        "Alíc.": FMT_ALIQ,
+    }
+    return df_to_xlsx_bytes(df, "Ventas", formats)
 
 
-def _extract_parties_from_layout(page: pdfplumber.page.Page) -> Tuple[Party, Party, Party]:
-    words = page.extract_words(keep_blank_chars=False, use_text_flow=True)
-    width = float(page.width)
-
-    comprador_x0 = None
-    vendedor_x0 = None
-    for w in words:
-        t = _norm(w.get("text", ""))
-        if t == "COMPRADOR" and comprador_x0 is None:
-            comprador_x0 = float(w.get("x0", 0))
-        if t == "VENDEDOR" and vendedor_x0 is None:
-            vendedor_x0 = float(w.get("x0", 0))
-
-    if comprador_x0 is not None and vendedor_x0 is not None and vendedor_x0 > comprador_x0:
-        x_split = (comprador_x0 + vendedor_x0) / 2.0
-    else:
-        x_split = width / 2.0
-
-    def find_top(token: str) -> Optional[float]:
-        tnorm = _norm(token)
-        tops = [w["top"] for w in words if _norm(w.get("text", "")) == tnorm]
-        return min(tops) if tops else None
-
-    y_compr = find_top("COMPRADOR")
-    y_actuo = find_top("ACTUÓ") or find_top("ACTUO")
-    y_start = y_compr if y_compr is not None else 0.0
-    y_end = y_actuo if y_actuo is not None else (y_start + 180.0)
-
-    block_words = [w for w in words if (w.get("top", 0) >= y_start and w.get("top", 0) <= y_end)]
-    left_words = [w for w in block_words if w.get("x0", 0) < x_split]
-    right_words = [w for w in block_words if w.get("x0", 0) >= x_split]
-
-    left_text = "\n".join(_group_words_to_lines(left_words))
-    right_text = "\n".join(_group_words_to_lines(right_words))
-
-    comprador = _party_from_text(left_text)
-    vendedor = _party_from_text(right_text)
-
-    acopio = Party(
-        razon_social=comprador.razon_social,
-        domicilio=comprador.domicilio,
-        localidad=comprador.localidad,
-        cuit=comprador.cuit,
-        iva=comprador.iva,
-    )
-    return acopio, comprador, vendedor
+def cpns_xlsx_bytes(liqs: List[Liquidacion]) -> bytes:
+    df = build_cpns_rows(liqs)
+    formats = {
+        "CANTIDAD DE KILOS": FMT_AMOUNT,
+        "PRECIO": FMT_MONEY,
+        "NETO": FMT_AMOUNT,
+        "IVA": FMT_AMOUNT,
+        "TOTAL": FMT_AMOUNT,
+        "RET IVA": FMT_AMOUNT,
+    }
+    return df_to_xlsx_bytes(df, "CPNs", formats)
 
 
-def _extract_grain(page_text: str) -> Tuple[str, str]:
-    m = re.search(r"\b(Soja|Ma[ií]z|Trigo|Girasol|Arveja|Sorgo|Camelina\s*Sativa)\b", page_text, flags=re.IGNORECASE)
-    if not m:
-        return "", ""
-    grain_raw = m.group(1)
-    gnorm = _norm(grain_raw).replace("Í", "I")
-    if "MAIZ" in gnorm:
-        gname = "MAIZ"
-    elif "SOJA" in gnorm:
-        gname = "SOJA"
-    elif "TRIGO" in gnorm:
-        gname = "TRIGO"
-    elif "GIRASOL" in gnorm:
-        gname = "GIRASOL"
-    elif "ARVEJA" in gnorm:
-        gname = "ARVEJA"
-    elif "SORGO" in gnorm:
-        gname = "SORGO"
-    elif "CAMELINA" in gnorm:
-        gname = "CAMELINA SATIVA"
-    else:
-        gname = gnorm
-    return gname.title() if gname != "MAIZ" else "Maíz", GRAIN_CODES.get(gname, "")
-
-
-def _extract_operation_numbers(page_text: str) -> Tuple[float, float, float, float, float, float]:
-    m = re.search(
-        r"\n\s*([0-9][0-9.,]*)\s*Kg\s*\$?\s*([0-9][0-9.,]*)\s*\$?\s*([0-9][0-9.,]*)\s*([0-9][0-9.,]*)\s*\$?\s*([0-9][0-9.,]*)\s*\$?\s*([0-9][0-9.,]*)",
-        page_text,
-        flags=re.IGNORECASE,
-    )
-    if not m:
-        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-    kilos = parse_number(m.group(1)) or 0.0
-    precio = parse_number(m.group(2)) or 0.0
-    neto = parse_number(m.group(3)) or 0.0
-    alic = parse_number(m.group(4)) or 0.0
-    iva = parse_number(m.group(5)) or 0.0
-    total = parse_number(m.group(6)) or 0.0
-    return kilos, precio, neto, alic, iva, total
-
-
-def _extract_campaign(page_text: str) -> str:
-    m = re.search(r"Campaña\s*[:\-]\s*([^\n]+)", page_text, flags=re.IGNORECASE)
-    return m.group(1).strip() if m else ""
-
-
-def _extract_me(page_text: str) -> Tuple[str, str, Optional[float], Optional[float], Optional[float], str]:
-    up = page_text.upper()
-    start = up.find("MERCADERIA ENTREGADA")
-    if start == -1:
-        start = up.find("MERCADERÍA ENTREGADA")
-    end = up.find("OPERACIÓN", start)
-    if end == -1:
-        end = up.find("OPERACION", start)
-    if start == -1 or end == -1 or end <= start:
-        return "", "", None, None, None, ""
-    sec = page_text[start:end]
-
-    nro = ""
-    grado = ""
-    factor = None
-    prot = None
-    peso = None
-
-    mrow = re.search(
-        r"\b(\d{10,14})\b\s+([A-Z0-9]{1,4})\s+([0-9][0-9.,]*)\s+([0-9][0-9.,]*)\s+([0-9][0-9.,]*)",
-        sec,
-        flags=re.IGNORECASE,
-    )
-    if mrow:
-        nro = mrow.group(1).strip()
-        grado = mrow.group(2).strip()
-        factor = parse_number(mrow.group(3))
-        prot = parse_number(mrow.group(4))
-        peso = parse_number(mrow.group(5))
-    else:
-        m = re.search(r"\b(\d{10,14})\b", sec)
-        if m:
-            nro = m.group(1).strip()
-            for line in sec.splitlines():
-                if nro in line:
-                    toks = re.findall(r"[-]?\d[\d.,]*", line)
-                    if toks:
-                        peso = parse_number(toks[-1])
-                    break
-
-    proced = ""
-    mloc = re.search(r"Localidad\s*:\s*([^\n]+)", sec, flags=re.IGNORECASE)
-    if mloc:
-        proced = re.sub(r"\s+", " ", mloc.group(1).strip())
-
-    return nro, grado, factor, prot, peso, proced
-
-
-def _slice_section(text: str, start_kw: str, end_markers: List[str]) -> str:
-    up = text.upper()
-    s = up.find(start_kw.upper())
-    if s == -1:
-        return ""
-    ends = []
-    for mk in end_markers:
-        idx = up.find(mk.upper(), s + len(start_kw))
-        if idx != -1:
-            ends.append(idx)
-    e = min(ends) if ends else len(text)
-    return text[s:e]
-
-
-def _extract_retencion_iva(page_text: str) -> float:
-    """
-    Lee SIEMPRE desde el cuadro "RETENCIONES" y toma el MONTO de la columna "Retenciones"
-    (o sea: el primer importe monetario que aparece inmediatamente DESPUÉS del porcentaje).
-    Esto evita agarrar el 5% o el 0,00 de "Imp. Cert. Ret." cuando viene al final.
-    """
-    sec = _slice_section(
-        page_text,
-        "RETENCIONES",
-        end_markers=[
-            "OTROS",
-            "GRADO",
-            "CONDICIONES",
-            "IMPORTES TOTALES",
-            "MERCADERIA ENTREGADA",
-            "MERCADERÍA ENTREGADA",
-        ],
-    )
-    if not sec:
-        return 0.0
-
-    # 1) Caso general (funciona para:
-    #    - "I.V.A. Retención de IVA ... 5% $ 397,029.60"
-    #    - "I.V.A. RET IVA SISA 1 ... 5% $ 2,500,000.00 0 $ 0.00"
-    m = re.search(
-        r"I\.?\s*V\.?\s*A\.?.{0,300}?(\d{1,3}(?:[.,]\d{1,3})?)\s*%\s*\$?\s*([0-9][0-9.,]*)",
-        sec,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    if m:
-        return float(parse_number(m.group(2)) or 0.0)
-
-    # 2) Fallback por líneas (si el PDF separó raro el texto)
-    best = 0.0
-    for ln in sec.splitlines():
-        if re.search(r"\bI\.?\s*V\.?\s*A\.?\b", ln, flags=re.IGNORECASE):
-            m2 = re.search(r"(\d{1,3}(?:[.,]\d{1,3})?)\s*%\s*\$?\s*([0-9][0-9.,]*)", ln)
-            if m2:
-                best = max(best, float(parse_number(m2.group(2)) or 0.0))
-    return best
-
-
-def _extract_deducciones(page_text: str) -> List[DeductionLine]:
-    up = page_text.upper()
-    s = up.find("DEDUCCIONES")
-    e = up.find("RETENCIONES")
-    if s == -1 or e == -1 or e <= s:
-        return []
-    sec = page_text[s:e]
-    lines = [l.strip() for l in sec.splitlines() if l.strip()]
-    out: List[DeductionLine] = []
-
-    for ln in lines:
-        if ln.lower().startswith("concepto") or "base cálculo" in ln.lower() or "base calculo" in ln.lower():
-            continue
-
-        ln2 = re.sub(r"\s+", " ", ln)
-
-        m = re.search(
-            r"^(.*?)\s+\$?\s*([0-9][0-9.,]*)\s+([0-9][0-9.,]*)%?\s+\$?\s*([0-9][0-9.,]*)\s+\$?\s*([0-9][0-9.,]*)\s*$",
-            ln2,
-        )
-        if m:
-            concepto = m.group(1).strip()
-            neto = parse_number(m.group(2)) or 0.0
-            alic = parse_number(m.group(3)) or 0.0
-            iva = parse_number(m.group(4)) or 0.0
-            total = parse_number(m.group(5)) or 0.0
-            out.append(DeductionLine(concepto=concepto, neto=neto, alic=alic, iva=iva, total=total))
-            continue
-
-        m0 = re.search(
-            r"^(.*?)\s+\$?\s*([0-9][0-9.,]*)\s+0%?\s+\$?\s*([0-9][0-9.,]*)\s+\$?\s*([0-9][0-9.,]*)\s*$",
-            ln2,
-        )
-        if m0:
-            concepto = m0.group(1).strip()
-            total = parse_number(m0.group(2)) or 0.0
-            iva = parse_number(m0.group(3)) or 0.0
-            total2 = parse_number(m0.group(4)) or total
-            out.append(DeductionLine(concepto=concepto, neto=total, alic=0.0, iva=iva, total=total2))
-            continue
-
-    cleaned: List[DeductionLine] = []
-    for d in out:
-        if _norm(d.concepto) in {"COMISION O GASTOS", "ADMINISTRATIVOS", "OTRAS DEDUCCIONES"}:
-            continue
-        cleaned.append(d)
-    return cleaned
-
-
-def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
-    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-        page0 = pdf.pages[0]
-        full_text = "\n".join((p.extract_text() or "") for p in pdf.pages)
-        page0_text = page0.extract_text() or ""
-
-    full_norm = _norm(full_text)
-    fecha, localidad = _extract_header_date_loc(page0_text)
-    tipo_cbte = _detect_tipo_cbte(full_norm)
-
-    mcoe = re.search(r"C\.O\.E\.\s*:\s*([0-9]{8,})", full_text, flags=re.IGNORECASE)
-    coe = mcoe.group(1).strip() if mcoe else ""
-    pv = coe[:4] if len(coe) >= 4 else ""
-    numero = coe[4:12] if len(coe) >= 12 else (coe[4:] if len(coe) > 4 else "")
-
-    try:
-        acopio, comprador, vendedor = _extract_par
+def gastos_xlsx_bytes(liqs: List[Liquidacion]) -> bytes:
+    df = build_gastos_rows(liqs)
+    formats = {
+        "Neto Gravado": FMT_AMOUNT,
+        "IVA Liquidado": FMT_AMOUNT,
+        "IVA Crédito": FMT_AMOUNT,
+        "Conceptos NG/EX": FMT_AMOUNT,
+        "Perc./Ret.": FMT_AMOUNT,
+        "Total": FMT_AMOUNT,
+        "Alíc.": FMT_ALIQ,
+    }
+    return df_to_xlsx_bytes(df, "Gastos", formats)
