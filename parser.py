@@ -397,13 +397,10 @@ def _extract_me(page_text: str) -> Tuple[str, str, Optional[float], Optional[flo
 
 def _extract_retenciones(page_text: str) -> Tuple[float, float]:
     """
-    FIX DEFINITIVO:
-    - Busca el cuadro RETENCIONES.
-    - Para IVA: toma el MONTO de la columna 'Retenciones' (no base, no %).
-      Soporta 2 formas:
-        A) ... 5% $ 365,476.32 ... -> toma 365,476.32
-        B) ... 5% 50,000,000.00 2,500,000.00 -> decide por relación ret≈base*%/100
-    - Ganancias: solo devuelve si el monto > 0 (si es 0, queda 0).
+    Retenciones:
+    - SOLO IVA (RA07): toma el MONTO de la columna 'Retenciones' del cuadro RETENCIONES.
+    - Ganancias: ignoradas (ret_gan = 0.0 siempre).
+    - Nunca toma % ni Base Cálculo.
     """
     up = (page_text or "").upper()
     s = up.find("RETENCIONES")
@@ -411,8 +408,11 @@ def _extract_retenciones(page_text: str) -> Tuple[float, float]:
         return 0.0, 0.0
 
     stop_candidates = []
-    for token in ["GRADO", "CONDICIONES", "OTROS", "MERCADERIA ENTREGADA", "MERCADERÍA ENTREGADA",
-                  "IMPORTES TOTALES", "OPERACIÓN", "OPERACION", "FIRMA"]:
+    for token in [
+        "GRADO", "CONDICIONES", "OTROS",
+        "MERCADERIA ENTREGADA", "MERCADERÍA ENTREGADA",
+        "IMPORTES TOTALES", "OPERACIÓN", "OPERACION", "FIRMA"
+    ]:
         idx = up.find(token, s + 1)
         if idx != -1:
             stop_candidates.append(idx)
@@ -421,8 +421,7 @@ def _extract_retenciones(page_text: str) -> Tuple[float, float]:
     sec = page_text[s:e]
     sec_compact = re.sub(r"\s+", " ", sec)
 
-    def pick_amount_from_window(win: str) -> float:
-        # 1) alícuota %
+    def pick_amount(win: str) -> float:
         mperc = re.search(r"(\d[\d.,]*)\s*%", win)
         if not mperc:
             return 0.0
@@ -432,12 +431,12 @@ def _extract_retenciones(page_text: str) -> Tuple[float, float]:
 
         tail = win[mperc.end():].strip()
 
-        # 2) si aparece $ después del % => ese es el monto de retención
+        # Caso A: luego del % viene $ <monto retención>
         mm = re.search(r"\$\s*([0-9][0-9.,]*)", tail)
         if mm:
             return float(parse_number(mm.group(1)) or 0.0)
 
-        # 3) si no hay $, normalmente quedan 2 importes: base y retención
+        # Caso B: luego del % vienen 2 importes (Base y Retención) sin $
         nums = [parse_number(x) for x in re.findall(r"[-]?\d[\d.,]*", tail)]
         nums = [float(x) for x in nums if x is not None and abs(x) > 0]
 
@@ -449,7 +448,6 @@ def _extract_retenciones(page_text: str) -> Tuple[float, float]:
             exp2 = b * (p / 100.0)
             err2 = abs(a - exp2) / max(1.0, abs(exp2))
 
-            # tolerancia 3%: suficiente para redondeos típicos
             if err1 <= err2 and err1 <= 0.03:
                 return float(b)
             if err2 < err1 and err2 <= 0.03:
@@ -457,34 +455,30 @@ def _extract_retenciones(page_text: str) -> Tuple[float, float]:
 
         return 0.0
 
-    def sum_rows(anchor_regex: str) -> float:
+    def sum_iva_rows() -> float:
         tot = 0.0
-        for m in re.finditer(anchor_regex, sec_compact, flags=re.IGNORECASE):
-            # ventana acotada para capturar % y montos de esa fila
-            win = sec_compact[m.start(): m.start() + 260]
-            amt = pick_amount_from_window(win)
-            if amt and abs(amt) > 1e-9:
-                tot += amt
+
+        # Anclas típicas: "RET IVA" o "IVA" dentro del cuadro
+        patterns = [r"\bRET\s*IVA\b", r"\bI\.?V\.?A\.?\b", r"\bIVA\b"]
+
+        for pat in patterns:
+            for m in re.finditer(pat, sec_compact, flags=re.IGNORECASE):
+                win = sec_compact[m.start(): m.start() + 260]
+                amt = pick_amount(win)
+                if amt and abs(amt) > 1e-9:
+                    tot += amt
+            if tot > 0:
+                break  # si ya encontró por la ancla más específica, no repetir
+
         return float(tot)
 
-    # IVA: anclar por "RET IVA" si existe, si no por "IVA ... RET"
-    if re.search(r"\bRET\s*IVA\b", sec_compact, flags=re.IGNORECASE):
-        ret_iva = sum_rows(r"\bRET\s*IVA\b")
-    else:
-        ret_iva = sum_rows(r"(?:I\.?V\.?A\.?|IVA).*?(?:RET|RETENCION)")
-
-    # GAN: SOLO si hay ancla de ganancias (RET GAN / GANANCIAS). Si no, 0.
-    if re.search(r"(?:\bRET\.?\s*GAN\b|\bRET\s*GAN\b|GANANCIAS)", sec_compact, flags=re.IGNORECASE):
-        ret_gan = sum_rows(r"(?:\bRET\.?\s*GAN\b|\bRET\s*GAN\b|GANANCIAS).*?(?:RET|RETENCION)?")
-    else:
-        ret_gan = 0.0
-
+    ret_iva = sum_iva_rows()
     if abs(ret_iva) < 1e-6:
         ret_iva = 0.0
-    if abs(ret_gan) < 1e-6:
-        ret_gan = 0.0
 
-    return ret_iva, ret_gan
+    # Ganancias ignoradas
+    return ret_iva, 0.0
+
 
 
 def _extract_deducciones(page_text: str) -> List[DeductionLine]:
