@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-
 import pandas as pd
 import streamlit as st
 from PIL import Image
@@ -60,75 +59,66 @@ if pdf_files:
 
     with st.spinner("Procesando PDFs..."):
         for uf in pdf_files:
-            try:
-                data = uf.read()
-                doc = parse_liquidacion_pdf(data, filename=uf.name)
-                parsed.append(doc)
+            data = uf.read()
+            doc = parse_liquidacion_pdf(data, filename=uf.name)
+            parsed.append(doc)
 
-                preview_rows.append({
-                    "Archivo": uf.name,
-                    "Fecha": doc.fecha,
-                    "Localidad": doc.localidad,
-                    "COE": doc.coe,
-                    "Tipo": doc.tipo_cbte,
-                    "Acopio/Comprador": (doc.comprador.razon_social or "").strip(),
-                    "CUIT Comprador": doc.comprador.cuit,
-                    "Grano": doc.grano,
-                    "Campaña": doc.campaña or "",
-                    "Kg": doc.kilos,
-                    "Precio/Kg": doc.precio,
-                    "Neto": doc.neto,
-                    "Alic IVA": doc.alic_iva,
-                    "IVA": doc.iva,
-                    "Percep IVA": getattr(doc, "perc_iva", 0.0),
-                    "Ret IVA": doc.ret_iva,
-                    "Ret Gan": doc.ret_gan,
-                    "Total": doc.total,
-                })
-            except Exception as e:
-                st.error(f"Error procesando {uf.name}: {e}")
+            preview_rows.append({
+                "Archivo": uf.name,
+                "Fecha": doc.fecha,
+                "Localidad": doc.localidad,
+                "COE": doc.coe,
+                "Tipo": doc.tipo_cbte,
+                "Acopio/Comprador": (doc.comprador.razon_social or "").strip(),
+                "CUIT Comprador": doc.comprador.cuit,
+                "Grano": doc.grano,
+                "Campaña": doc.campaña or "",
+                "Kg": doc.kilos,
+                "Precio/Kg": doc.precio,
+                "Neto": doc.neto,
+                "Alic IVA": doc.alic_iva,
+                "IVA": doc.iva,
+                "Percep IVA": getattr(doc, "perc_iva", 0.0),
+                "Ret IVA": doc.ret_iva,
+                "Ret Gan": doc.ret_gan,
+                "Total": doc.total,
+            })
 
-    if preview_rows:
-        st.subheader("Vista previa")
-        df = pd.DataFrame(preview_rows)
+    st.subheader("Vista previa")
+    df = pd.DataFrame(preview_rows)
 
-        df_show = df.copy()
-        for col in ["Kg","Precio/Kg","Neto","IVA","Percep IVA","Ret IVA","Ret Gan","Total"]:
-            if col in df_show.columns:
-                df_show[col] = df_show[col].apply(fmt_amount)
-        if "Alic IVA" in df_show.columns:
-            df_show["Alic IVA"] = df_show["Alic IVA"].apply(fmt_aliq)
+    df_show = df.copy()
+    for col in ["Kg", "Precio/Kg", "Neto", "IVA", "Percep IVA", "Ret IVA", "Ret Gan", "Total"]:
+        df_show[col] = df_show[col].apply(fmt_amount)
+    df_show["Alic IVA"] = df_show["Alic IVA"].apply(fmt_aliq)
 
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
+    st.dataframe(df_show, use_container_width=True, hide_index=True)
 
-        b1, b2, b3 = st.columns(3)
-
-        with b1:
-            out = build_excel_ventas(parsed)
-            st.download_button(
-                "Descargar Ventas",
-                data=out.getvalue(),
-                file_name="ventas.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-
-        with b2:
-            out = build_excel_cpns(parsed)
-            st.download_button(
-                "Descargar CPNs",
-                data=out.getvalue(),
-                file_name="cpns.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-
-        with b3:
-            out = build_excel_gastos(parsed)
-            st.download_button(
-                "Descargar Gastos",
-                data=out.getvalue(),
-                file_name="gastos.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        out = build_excel_ventas(parsed)
+        st.download_button(
+            "Descargar Ventas",
+            data=out.getvalue(),
+            file_name="ventas.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    with col2:
+        out = build_excel_cpns(parsed)
+        st.download_button(
+            "Descargar CPNs",
+            data=out.getvalue(),
+            file_name="cpns.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    with col3:
+        out = build_excel_gastos(parsed)
+        st.download_button(
+            "Descargar Gastos",
+            data=out.getvalue(),
+            file_name="gastos.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
