@@ -1,38 +1,21 @@
-from __future__ import annotations
-
-from pathlib import Path
-import pandas as pd
+# app.py
 import streamlit as st
+import pandas as pd
+from pathlib import Path
 from PIL import Image
 
 from parser import parse_liquidacion_pdf
-from exporters import build_excel_ventas, build_excel_cpns, build_excel_gastos
+from exporters import (
+    build_ventas_rows,
+    build_cpns_rows,
+    build_gastos_rows,
+    df_to_xlsx_bytes,
+)
 
 APP_TITLE = "IA liquidaciones agropecuarias"
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "logo_aie.png"
-
-
-def fmt_amount(x):
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return ""
-    try:
-        v = float(x)
-        return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except Exception:
-        return x
-
-
-def fmt_aliq(x):
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return ""
-    try:
-        v = float(x)
-        return f"{v:,.3f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except Exception:
-        return x
-
 
 st.set_page_config(
     page_title=APP_TITLE,
@@ -50,35 +33,52 @@ with c2:
 pdf_files = st.file_uploader(
     "Subí una o más liquidaciones (PDF)",
     type=["pdf"],
-    accept_multiple_files=True,
+    accept_multiple_files=True
 )
 
+def fmt_amount(x):
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return ""
+    try:
+        v = float(x)
+    except Exception:
+        return x
+    return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+def fmt_aliq(x):
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return ""
+    try:
+        v = float(x)
+    except Exception:
+        return x
+    return f"{v:,.3f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
 if pdf_files:
-    parsed = []
+    docs = []
     preview_rows = []
 
     with st.spinner("Procesando PDFs..."):
         for uf in pdf_files:
             data = uf.read()
             doc = parse_liquidacion_pdf(data, filename=uf.name)
-            parsed.append(doc)
+            docs.append(doc)
 
             preview_rows.append({
                 "Archivo": uf.name,
                 "Fecha": doc.fecha,
                 "Localidad": doc.localidad,
                 "COE": doc.coe,
-                "Tipo": doc.tipo_cbte,
-                "Acopio/Comprador": (doc.comprador.razon_social or "").strip(),
-                "CUIT Comprador": doc.comprador.cuit,
+                "CUIT Comprador": doc.acopio.cuit,
+                "Acopio/Comprador": doc.acopio.razon_social,
                 "Grano": doc.grano,
-                "Campaña": doc.campaña or "",
+                "Campaña": doc.campaña,
                 "Kg": doc.kilos,
                 "Precio/Kg": doc.precio,
                 "Neto": doc.neto,
                 "Alic IVA": doc.alic_iva,
                 "IVA": doc.iva,
-                "Percep IVA": getattr(doc, "perc_iva", 0.0),
+                "Percep IVA": doc.percep_iva,
                 "Ret IVA": doc.ret_iva,
                 "Ret Gan": doc.ret_gan,
                 "Total": doc.total,
@@ -89,36 +89,44 @@ if pdf_files:
 
     df_show = df.copy()
     for col in ["Kg", "Precio/Kg", "Neto", "IVA", "Percep IVA", "Ret IVA", "Ret Gan", "Total"]:
-        df_show[col] = df_show[col].apply(fmt_amount)
-    df_show["Alic IVA"] = df_show["Alic IVA"].apply(fmt_aliq)
+        if col in df_show.columns:
+            df_show[col] = df_show[col].apply(fmt_amount)
+    if "Alic IVA" in df_show.columns:
+        df_show["Alic IVA"] = df_show["Alic IVA"].apply(fmt_aliq)
 
     st.dataframe(df_show, use_container_width=True, hide_index=True)
 
     col1, col2, col3 = st.columns(3)
+
     with col1:
-        out = build_excel_ventas(parsed)
+        dfv = build_ventas_rows(docs)
+        out = df_to_xlsx_bytes(dfv, sheet_name="Ventas")
         st.download_button(
             "Descargar Ventas",
-            data=out.getvalue(),
+            data=out,
             file_name="ventas.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            use_container_width=True
         )
+
     with col2:
-        out = build_excel_cpns(parsed)
+        dfc = build_cpns_rows(docs)
+        out = df_to_xlsx_bytes(dfc, sheet_name="CPNs")
         st.download_button(
             "Descargar CPNs",
-            data=out.getvalue(),
+            data=out,
             file_name="cpns.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            use_container_width=True
         )
+
     with col3:
-        out = build_excel_gastos(parsed)
+        dfg = build_gastos_rows(docs)
+        out = df_to_xlsx_bytes(dfg, sheet_name="Gastos")
         st.download_button(
             "Descargar Gastos",
-            data=out.getvalue(),
+            data=out,
             file_name="gastos.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            use_container_width=True
         )
