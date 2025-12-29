@@ -10,7 +10,10 @@ from typing import List, Optional, Tuple
 import pdfplumber
 
 
+# ------------------------- Helpers -------------------------
+
 def _norm(s: str) -> str:
+    """Uppercase, remove accents, normalize spaces."""
     if s is None:
         return ""
     s = s.strip()
@@ -22,6 +25,12 @@ def _norm(s: str) -> str:
 
 
 def parse_number(raw: str) -> Optional[float]:
+    """
+    Parse numbers that may be:
+    - 2,585.00 (US)
+    - 27,14 (EU)
+    - 2585000.00
+    """
     if raw is None:
         return None
     s = str(raw).strip()
@@ -57,15 +66,20 @@ def parse_cuit_digits(raw: str) -> str:
     if raw is None:
         return ""
     s = str(raw)
+
     m = re.search(r"\b(\d{2})\D?(\d{8})\D?(\d)\b", s)
     if m:
         return f"{m.group(1)}{m.group(2)}{m.group(3)}"
+
     m2 = re.search(r"\b(\d{11})\b", s)
     if m2:
         return m2.group(1)
+
     d = re.sub(r"\D", "", s)
     return d[:11] if len(d) >= 11 else d
 
+
+# ------------------------- Domain -------------------------
 
 @dataclass
 class Party:
@@ -101,16 +115,14 @@ class Liquidacion:
     filename: str
     fecha: str
     localidad: str
-    tipo_cbte: str
-    letra: str
+    tipo_cbte: str   # F1/F2
+    letra: str       # A
     coe: str
     pv: str
     numero: str
-
     acopio: Party
     comprador: Party
     vendedor: Party
-
     grano: str
     cod_neto_venta: str
     kilos: float
@@ -120,18 +132,20 @@ class Liquidacion:
     iva: float
     total: float
     campaña: str
-
+    # MERCADERIA ENTREGADA (simple; si luego querés lista, lo ampliamos)
     me_nro_comprobante: str
     me_grado: str
     me_factor: Optional[float]
     me_contenido_proteico: Optional[float]
     me_peso_kg: Optional[float]
     me_procedencia: str
-
+    # RETENCIONES
     ret_iva: float
-    ret_gan: float  # se deja por compatibilidad, pero queda siempre 0
+    ret_gan: float
     deducciones: List[DeductionLine]
 
+
+# ------------------------- Parsing -------------------------
 
 GRAIN_CODES = {
     "SOJA": "123",
@@ -161,7 +175,6 @@ def _extract_header_date_loc(page_text: str) -> Tuple[str, str]:
 def _party_from_text(side_text: str) -> Party:
     if not side_text:
         return Party()
-
     txt = side_text.replace("\r", "\n")
     lines = [l.strip() for l in txt.split("\n") if l.strip()]
 
@@ -219,13 +232,10 @@ def _party_from_text(side_text: str) -> Party:
                 v2 = v2[:idx].strip()
         return re.sub(r"\s+", " ", v2).strip()
 
-    return Party(
-        razon_social=_cut_at_labels(razon),
-        domicilio=_cut_at_labels(domicilio),
-        localidad=localidad,
-        cuit=cuit,
-        iva=iva,
-    )
+    razon = _cut_at_labels(razon)
+    domicilio = _cut_at_labels(domicilio)
+
+    return Party(razon_social=razon, domicilio=domicilio, localidad=localidad, cuit=cuit, iva=iva)
 
 
 def _group_words_to_lines(words: List[dict]) -> List[str]:
@@ -301,15 +311,11 @@ def _extract_parties_from_layout(page: pdfplumber.page.Page) -> Tuple[Party, Par
 
 
 def _extract_grain(page_text: str) -> Tuple[str, str]:
-    m = re.search(
-        r"\b(Soja|Ma[ií]z|Trigo|Girasol|Arveja|Sorgo|Camelina\s*Sativa)\b",
-        page_text, flags=re.IGNORECASE
-    )
+    m = re.search(r"\b(Soja|Ma[ií]z|Trigo|Girasol|Arveja|Sorgo|Camelina\s*Sativa)\b", page_text, flags=re.IGNORECASE)
     if not m:
         return "", ""
     grain_raw = m.group(1)
     gnorm = _norm(grain_raw).replace("Í", "I")
-
     if "MAIZ" in gnorm:
         gname = "MAIZ"
     elif "SOJA" in gnorm:
@@ -326,14 +332,14 @@ def _extract_grain(page_text: str) -> Tuple[str, str]:
         gname = "CAMELINA SATIVA"
     else:
         gname = gnorm
-
     return gname.title() if gname != "MAIZ" else "Maíz", GRAIN_CODES.get(gname, "")
 
 
 def _extract_operation_numbers(page_text: str) -> Tuple[float, float, float, float, float, float]:
     m = re.search(
         r"\n\s*([0-9][0-9.,]*)\s*Kg\s*\$?\s*([0-9][0-9.,]*)\s*\$?\s*([0-9][0-9.,]*)\s*([0-9][0-9.,]*)\s*\$?\s*([0-9][0-9.,]*)\s*\$?\s*([0-9][0-9.,]*)",
-        page_text, flags=re.IGNORECASE,
+        page_text,
+        flags=re.IGNORECASE,
     )
     if not m:
         return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
@@ -371,7 +377,8 @@ def _extract_me(page_text: str) -> Tuple[str, str, Optional[float], Optional[flo
 
     mrow = re.search(
         r"\b(\d{10,14})\b\s+([A-Z0-9]{1,4})\s+([0-9][0-9.,]*)\s+([0-9][0-9.,]*)\s+([0-9][0-9.,]*)",
-        sec, flags=re.IGNORECASE,
+        sec,
+        flags=re.IGNORECASE,
     )
     if mrow:
         nro = mrow.group(1).strip()
@@ -379,6 +386,16 @@ def _extract_me(page_text: str) -> Tuple[str, str, Optional[float], Optional[flo
         factor = parse_number(mrow.group(3))
         prot = parse_number(mrow.group(4))
         peso = parse_number(mrow.group(5))
+    else:
+        m = re.search(r"\b(\d{10,14})\b", sec)
+        if m:
+            nro = m.group(1).strip()
+            for line in sec.splitlines():
+                if nro in line:
+                    toks = re.findall(r"[-]?\d[\d.,]*", line)
+                    if toks:
+                        peso = parse_number(toks[-1])
+                    break
 
     proced = ""
     mloc = re.search(r"Localidad\s*:\s*([^\n]+)", sec, flags=re.IGNORECASE)
@@ -388,75 +405,60 @@ def _extract_me(page_text: str) -> Tuple[str, str, Optional[float], Optional[flo
     return nro, grado, factor, prot, peso, proced
 
 
-def _extract_retenciones(page_text: str) -> Tuple[float, float]:
-    """
-    SOLO IVA:
-    - Busca sección RETENCIONES.
-    - Toma el MONTO 'Retenciones' (no % ni base).
-    - Ignora Ganancias: ret_gan=0.0
-    """
-    up = (page_text or "").upper()
-    s = up.find("RETENCIONES")
+def _slice_section(text: str, start_kw: str, end_markers: List[str]) -> str:
+    up = text.upper()
+    s = up.find(start_kw.upper())
     if s == -1:
-        return 0.0, 0.0
-
-    stop_candidates = []
-    for token in [
-        "GRADO", "CONDICIONES", "OTROS",
-        "MERCADERIA ENTREGADA", "MERCADERÍA ENTREGADA",
-        "IMPORTES TOTALES", "OPERACIÓN", "OPERACION", "FIRMA"
-    ]:
-        idx = up.find(token, s + 1)
+        return ""
+    ends = []
+    for mk in end_markers:
+        idx = up.find(mk.upper(), s + len(start_kw))
         if idx != -1:
-            stop_candidates.append(idx)
-    e = min(stop_candidates) if stop_candidates else len(page_text)
+            ends.append(idx)
+    e = min(ends) if ends else len(text)
+    return text[s:e]
 
-    sec = page_text[s:e]
-    lines = [ln.strip() for ln in sec.splitlines() if ln.strip()]
 
-    def amount_from_line_with_percent(line: str) -> float:
-        # requerimos % para no confundir con netos/totales
-        mperc = re.search(r"(\d[\d.,]*)\s*%", line)
-        if not mperc:
-            return 0.0
-        p = parse_number(mperc.group(1)) or 0.0
-        if abs(p) < 1e-12:
-            return 0.0
-
-        tail = line[mperc.end():]
-
-        # Caso con $
-        mm = re.search(r"\$\s*([0-9][0-9.,]*)", tail)
-        if mm:
-            return float(parse_number(mm.group(1)) or 0.0)
-
-        # Caso sin $: base y retención
-        nums = [parse_number(x) for x in re.findall(r"[-]?\d[\d.,]*", tail)]
-        nums = [float(x) for x in nums if x is not None and abs(x) > 0]
-        if len(nums) >= 2:
-            base, ret = nums[0], nums[1]
-            exp = base * (p / 100.0)
-            if abs(ret - exp) / max(1.0, abs(exp)) <= 0.03:
-                return float(ret)
-
-            # fallback: si vienen invertidos
-            exp2 = ret * (p / 100.0)
-            if abs(base - exp2) / max(1.0, abs(exp2)) <= 0.03:
-                return float(base)
-
+def _extract_retencion_iva(page_text: str) -> float:
+    """
+    Lee SIEMPRE desde el cuadro "RETENCIONES" y toma el MONTO de la columna "Retenciones"
+    (o sea: el primer importe monetario que aparece inmediatamente DESPUÉS del porcentaje).
+    Esto evita agarrar el 5% o el 0,00 de "Imp. Cert. Ret." cuando viene al final.
+    """
+    sec = _slice_section(
+        page_text,
+        "RETENCIONES",
+        end_markers=[
+            "OTROS",
+            "GRADO",
+            "CONDICIONES",
+            "IMPORTES TOTALES",
+            "MERCADERIA ENTREGADA",
+            "MERCADERÍA ENTREGADA",
+        ],
+    )
+    if not sec:
         return 0.0
 
-    ret_iva = 0.0
-    for ln in lines:
-        ln_norm = _norm(ln)
-        # IVA (varios formatos)
-        if ("IVA" in ln_norm or "I V A" in ln_norm) and "%" in ln:
-            ret_iva += amount_from_line_with_percent(ln)
+    # 1) Caso general (funciona para:
+    #    - "I.V.A. Retención de IVA ... 5% $ 397,029.60"
+    #    - "I.V.A. RET IVA SISA 1 ... 5% $ 2,500,000.00 0 $ 0.00"
+    m = re.search(
+        r"I\.?\s*V\.?\s*A\.?.{0,300}?(\d{1,3}(?:[.,]\d{1,3})?)\s*%\s*\$?\s*([0-9][0-9.,]*)",
+        sec,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if m:
+        return float(parse_number(m.group(2)) or 0.0)
 
-    if abs(ret_iva) < 1e-6:
-        ret_iva = 0.0
-
-    return float(ret_iva), 0.0
+    # 2) Fallback por líneas (si el PDF separó raro el texto)
+    best = 0.0
+    for ln in sec.splitlines():
+        if re.search(r"\bI\.?\s*V\.?\s*A\.?\b", ln, flags=re.IGNORECASE):
+            m2 = re.search(r"(\d{1,3}(?:[.,]\d{1,3})?)\s*%\s*\$?\s*([0-9][0-9.,]*)", ln)
+            if m2:
+                best = max(best, float(parse_number(m2.group(2)) or 0.0))
+    return best
 
 
 def _extract_deducciones(page_text: str) -> List[DeductionLine]:
@@ -470,13 +472,14 @@ def _extract_deducciones(page_text: str) -> List[DeductionLine]:
     out: List[DeductionLine] = []
 
     for ln in lines:
-        if ln.lower().startswith("concepto") or "base cálculo" in ln.lower():
+        if ln.lower().startswith("concepto") or "base cálculo" in ln.lower() or "base calculo" in ln.lower():
             continue
+
         ln2 = re.sub(r"\s+", " ", ln)
 
         m = re.search(
             r"^(.*?)\s+\$?\s*([0-9][0-9.,]*)\s+([0-9][0-9.,]*)%?\s+\$?\s*([0-9][0-9.,]*)\s+\$?\s*([0-9][0-9.,]*)\s*$",
-            ln2
+            ln2,
         )
         if m:
             concepto = m.group(1).strip()
@@ -489,7 +492,7 @@ def _extract_deducciones(page_text: str) -> List[DeductionLine]:
 
         m0 = re.search(
             r"^(.*?)\s+\$?\s*([0-9][0-9.,]*)\s+0%?\s+\$?\s*([0-9][0-9.,]*)\s+\$?\s*([0-9][0-9.,]*)\s*$",
-            ln2
+            ln2,
         )
         if m0:
             concepto = m0.group(1).strip()
@@ -499,7 +502,12 @@ def _extract_deducciones(page_text: str) -> List[DeductionLine]:
             out.append(DeductionLine(concepto=concepto, neto=total, alic=0.0, iva=iva, total=total2))
             continue
 
-    return out
+    cleaned: List[DeductionLine] = []
+    for d in out:
+        if _norm(d.concepto) in {"COMISION O GASTOS", "ADMINISTRATIVOS", "OTRAS DEDUCCIONES"}:
+            continue
+        cleaned.append(d)
+    return cleaned
 
 
 def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
@@ -518,49 +526,4 @@ def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
     numero = coe[4:12] if len(coe) >= 12 else (coe[4:] if len(coe) > 4 else "")
 
     try:
-        acopio, comprador, vendedor = _extract_parties_from_layout(page0)
-    except Exception:
-        acopio = Party()
-        comprador = Party()
-        vendedor = Party()
-
-    grano, cod_neto_venta = _extract_grain(full_text)
-    kilos, precio, neto, alic_iva, iva, total = _extract_operation_numbers(full_text)
-
-    campaña = _extract_campaign(full_text)
-    me_nro, me_grado, me_factor, me_prot, me_peso, me_proced = _extract_me(full_text)
-
-    ret_iva, ret_gan = _extract_retenciones(full_text)
-    deducciones = _extract_deducciones(full_text)
-
-    return Liquidacion(
-        filename=filename,
-        fecha=fecha,
-        localidad=localidad,
-        tipo_cbte=tipo_cbte,
-        letra="A",
-        coe=coe,
-        pv=pv,
-        numero=numero,
-        acopio=acopio,
-        comprador=comprador,
-        vendedor=vendedor,
-        grano=grano,
-        cod_neto_venta=cod_neto_venta,
-        kilos=kilos,
-        precio=precio,
-        neto=neto,
-        alic_iva=alic_iva,
-        iva=iva,
-        total=total,
-        campaña=campaña,
-        me_nro_comprobante=me_nro,
-        me_grado=me_grado,
-        me_factor=me_factor,
-        me_contenido_proteico=me_prot,
-        me_peso_kg=me_peso,
-        me_procedencia=me_proced,
-        ret_iva=ret_iva,
-        ret_gan=0.0,
-        deducciones=deducciones,
-    )
+        acopio, comprador, vendedor = _extract_par
