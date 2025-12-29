@@ -442,63 +442,94 @@ def _extract_percepcion_iva(full_text: str) -> float:
 
 def _extract_retenciones(page_text: str) -> Tuple[float, float]:
     """
-    Lee la TABLA de RETENCIONES:
-      Concepto | Detalle | ... | Base Cálculo | Alícuota | Retenciones (monto)
+    Lee la tabla de RETENCIONES y toma el MONTO de la columna 'Retenciones'.
 
-    Robusto a PDFs donde:
-    - la fila viene partida en varias líneas
-    - el monto no tiene '$'
-    - hay retenciones en 0
+    Regla robusta:
+      - Dentro del bloque RETENCIONES, para cada fila buscamos el patrón:  <alícuota%> <monto>
+        (con o sin '$'), y tomamos el ÚLTIMO par %->monto de la fila (porque puede haber 0% y luego 5%).
+      - Si no hay retenciones o no aparece la fila, devuelve 0.0.
+      - Ganancias se devuelve solo si se detecta su fila; si el monto es 0, queda 0.
+
+    Evita:
+      - tomar la BASE CÁLCULO
+      - tomar la ALÍCUOTA (5%)
+      - tomar totales fuera de la tabla
     """
     up = (page_text or "").upper()
     s = up.find("RETENCIONES")
     if s == -1:
         return 0.0, 0.0
 
-    # cortar al finalizar la sección (normalmente antes de IMPORTES TOTALES)
-    e = up.find("IMPORTES TOTALES", s)
-    if e == -1:
-        # fallback por si cambia el título
-        e_candidates = [
-            up.find("IMPORTES TOTALES DE LA LIQUIDACIÓN", s),
-            up.find("OPERACIÓN", s),
-            up.find("OPERACION", s),
-        ]
-        e_candidates = [x for x in e_candidates if x != -1]
-        e = min(e_candidates) if e_candidates else len(page_text)
+    # Cortar la sección para no contaminar con totales del resumen
+    stop_candidates = [
+        up.find("OTROS", s),
+        up.find("GRADO", s),
+        up.find("CONDICIONES", s),
+        up.find("IMPORTES TOTALES", s),
+        up.find("IMPORTES TOTALES DE LA LIQUIDACIÓN", s),
+        up.find("IMPORTES TOTALES DE LA LIQUIDACION", s),
+        up.find("OPERACIÓN", s),
+        up.find("OPERACION", s),
+    ]
+    stop_candidates = [x for x in stop_candidates if x != -1]
+    e = min(stop_candidates) if stop_candidates else len(page_text)
 
     sec = page_text[s:e]
     lines = [ln.strip() for ln in sec.splitlines() if ln.strip()]
 
-    def last_non_percent_number(text: str) -> float:
+    def nrm(x: str) -> str:
+        return _norm(x)
+
+    def extract_ret_amount_from_text(txt: str) -> float:
         """
-        Devuelve el último número de la ventana que NO sea porcentaje.
-        Eso coincide con la columna 'Retenciones' de la tabla, incluso sin '$'.
+        Extrae el monto de 'Retenciones' de una fila:
+        - busca pares "<porcentaje>% <monto>" (con o sin $)
+        - toma el ÚLTIMO par encontrado (ej: "0% 0.00 ... 5% 365,476.32" => 365,476.32)
         """
-        best = None
-        for m in re.finditer(r"[-]?\d[\d.,]*", text):
-            token = m.group(0)
-            v = parse_number(token)
+        # Normalizar para que el regex cruce saltos de línea
+        t = re.sub(r"\s+", " ", txt)
+
+        pairs = re.findall(r"(\d[\d.,]*)\s*%\s*\$?\s*([-]?\d[\d.,]*)", t)
+        if pairs:
+            last_amt = pairs[-1][1]
+            v = parse_number(last_amt)
+            return float(v or 0.0)
+
+        # Fallback: si no hay %->monto, tomar el último monto con '$'
+        ms = re.findall(r"\$\s*([-]?\d[\d.,]*)", t)
+        if ms:
+            v = parse_number(ms[-1])
+            return float(v or 0.0)
+
+        # Último fallback: último número "grande" de la fila (evita quedarse con %)
+        nums = re.findall(r"[-]?\d[\d.,]*", t)
+        for tok in reversed(nums):
+            v = parse_number(tok)
             if v is None:
                 continue
-            after = text[m.end():m.end() + 3]
-            if re.match(r"\s*%", after):  # no tomar alícuota
+            # evitar devolver una alícuota típica
+            if abs(v) in (0.0, 5.0, 10.5, 21.0, 27.0):
                 continue
-            best = float(v)
-        return float(best or 0.0)
+            return float(v)
+        return 0.0
 
-    def is_iva_row_start(ln: str) -> bool:
-        n = ln.upper()
-        return (("I.V.A" in n) or ("I V A" in n) or n.startswith("IVA")) and ("RET" in n or "RETENC" in n) and ("GANANC" not in n)
+    def is_start_iva(ln_norm: str) -> bool:
+        # Detecta la fila de IVA dentro de la tabla de retenciones
+        return ("IVA" in ln_norm or "I V A" in ln_norm or "I.V.A" in ln_norm) and ("RET" in ln_norm or "RETENC" in ln_norm)
 
-    def is_gan_row_start(ln: str) -> bool:
-        n = ln.upper()
-        return ("GANANC" in n or "RET.GAN" in n) and ("RET" in n or "RETENC" in n)
+    def is_start_gan(ln_norm: str) -> bool:
+        return "GANANC" in ln_norm and ("RET" in ln_norm or "RETENC" in ln_norm)
 
-    def window_from(i: int, stop_pred, max_lines: int = 10) -> str:
-        parts = [lines[i]]
-        for j in range(i + 1, min(len(lines), i + max_lines)):
-            if stop_pred(lines[j]):
+    def is_start_other_row(ln_norm: str) -> bool:
+        # inicio de otra fila/concepto que corta la ventana
+        return ln_norm.startswith("OTROS") or "GRAVAMEN" in ln_norm or "GRAVÁMEN" in ln_norm
+
+    def take_row_block(start_idx: int) -> str:
+        # arma bloque de fila (porque suele venir partida en 2-3 líneas)
+        parts = [lines[start_idx]]
+        for j in range(start_idx + 1, min(len(lines), start_idx + 10)):
+            nj = nrm(lines[j])
+            if is_start_iva(nj) or is_start_gan(nj) or is_start_other_row(nj):
                 break
             parts.append(lines[j])
         return " ".join(parts)
@@ -506,20 +537,16 @@ def _extract_retenciones(page_text: str) -> Tuple[float, float]:
     ret_iva = 0.0
     ret_gan = 0.0
 
-    # Ganancias: ventana hasta antes de la fila IVA (así no se contamina)
     for i, ln in enumerate(lines):
-        if is_gan_row_start(ln):
-            win = window_from(i, stop_pred=is_iva_row_start, max_lines=12)
-            ret_gan = last_non_percent_number(win)
-            break
+        ln_norm = nrm(ln)
+        if is_start_gan(ln_norm) and ret_gan == 0.0:
+            block = take_row_block(i)
+            ret_gan = extract_ret_amount_from_text(block)
+        if is_start_iva(ln_norm) and ret_iva == 0.0:
+            block = take_row_block(i)
+            ret_iva = extract_ret_amount_from_text(block)
 
-    # IVA: desde su fila hasta el final de la sección
-    for i, ln in enumerate(lines):
-        if is_iva_row_start(ln):
-            win = window_from(i, stop_pred=lambda _: False, max_lines=12)
-            ret_iva = last_non_percent_number(win)
-            break
-
+    # Si la fila de Ganancias existe pero viene 0, queda 0 (y el export no debe generar línea)
     return float(ret_iva or 0.0), float(ret_gan or 0.0)
 
 
