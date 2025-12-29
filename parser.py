@@ -498,16 +498,16 @@ def _extract_percepcion_iva(full_text: str) -> float:
 
 
 def _extract_retenciones(page_text: str) -> Tuple[float, float]:
-    """Extrae retenciones IVA y Ganancias del bloque RETENCIONES."""
-    ret_iva = 0.0
-    ret_gan = 0.0
-
-    up = page_text.upper()
+    """
+    Extrae retenciones IVA y Ganancias del bloque RETENCIONES.
+    IMPORTANTE: toma importes ($ xxxx) y NO porcentajes (ej. 5%).
+    """
+    up = (page_text or "").upper()
     s = up.find("RETENCIONES")
     if s == -1:
         return 0.0, 0.0
 
-    # terminar antes del bloque de condiciones / grado / otros
+    # cortar antes de otros bloques
     e_candidates = [
         up.find("GRADO", s),
         up.find("CONDICIONES", s),
@@ -515,33 +515,44 @@ def _extract_retenciones(page_text: str) -> Tuple[float, float]:
     ]
     e_candidates = [e for e in e_candidates if e != -1]
     e = min(e_candidates) if e_candidates else len(page_text)
+
     sec = page_text[s:e]
 
-    def last_money(line: str) -> float:
-        nums = re.findall(r"[-]?\d[\d.,]*", line)
-        return parse_number(nums[-1]) or 0.0 if nums else 0.0
+    def last_currency_amount(line: str) -> Optional[float]:
+        # toma el último monto con $ (evita que agarre 5% u otros números sueltos)
+        matches = re.findall(r"\$\s*([0-9][0-9.,]*)", line)
+        if not matches:
+            return None
+        return parse_number(matches[-1])
+
+    ret_iva = 0.0
+    ret_gan = 0.0
 
     for ln in sec.splitlines():
         ln_norm = _norm(ln)
 
-        if "RETENCION DE IVA" in ln_norm or "RETENCION IVA" in ln_norm:
-            ret_iva = max(ret_iva, last_money(ln))
+        # IVA: líneas que contengan IVA y algún monto con $
+        if ("IVA" in ln_norm) and ("$" in ln):
+            v = last_currency_amount(ln)
+            if v is not None:
+                ret_iva = max(ret_iva, float(v))
 
-        if "I V A" in ln_norm and "%" in ln and "$" in ln:
-            ret_iva = max(ret_iva, last_money(ln))
+        # Ganancias
+        if ("GANANCIAS" in ln_norm) and ("$" in ln):
+            v = last_currency_amount(ln)
+            if v is not None:
+                ret_gan = max(ret_gan, float(v))
 
-        if "GANANCIAS" in ln_norm and ("RET" in ln_norm or "RETENCION" in ln_norm):
-            ret_gan = max(ret_gan, last_money(ln))
-
+    # fallback por si el pdf partió el $ en otra línea
     if ret_iva == 0.0:
-        m = re.search(r"\bI\.V\.A\..*?\$\s*([0-9][0-9.,]*)\s*$", sec, flags=re.IGNORECASE | re.MULTILINE)
+        m = re.search(r"(RETENCION.*IVA|I\.V\.A\.).*?\$\s*([0-9][0-9.,]*)", sec, flags=re.IGNORECASE)
         if m:
-            ret_iva = parse_number(m.group(1)) or 0.0
+            ret_iva = float(parse_number(m.group(2)) or 0.0)
 
     if ret_gan == 0.0:
         m = re.search(r"GANANCIAS.*?\$\s*([0-9][0-9.,]*)", sec, flags=re.IGNORECASE)
         if m:
-            ret_gan = parse_number(m.group(1)) or 0.0
+            ret_gan = float(parse_number(m.group(1)) or 0.0)
 
     return float(ret_iva or 0.0), float(ret_gan or 0.0)
 
