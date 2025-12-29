@@ -4,12 +4,7 @@ from pathlib import Path
 from PIL import Image
 
 from parser import parse_liquidacion_pdf
-from exporters import (
-    build_ventas_rows,
-    build_cpns_rows,
-    build_gastos_rows,
-    df_to_xlsx_bytes,
-)
+from exporters import ventas_xlsx_bytes, cpns_xlsx_bytes, gastos_xlsx_bytes
 
 APP_TITLE = "IA liquidaciones agropecuarias"
 
@@ -38,50 +33,54 @@ pdf_files = st.file_uploader(
 def fmt_amount(x):
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return ""
-    if isinstance(x, (int, float)):
-        return f"{x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    return x
+    try:
+        v = float(x)
+    except Exception:
+        return str(x)
+    # 1.000,00
+    return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 def fmt_aliq(x):
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return ""
-    if isinstance(x, (int, float)):
-        return f"{x:,.3f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    return x
+    try:
+        v = float(x)
+    except Exception:
+        return str(x)
+    # 10,500
+    return f"{v:,.3f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 if pdf_files:
-    parsed = []
+    liqs = []
     preview_rows = []
 
     with st.spinner("Procesando PDFs..."):
         for uf in pdf_files:
             data = uf.read()
-            doc = parse_liquidacion_pdf(data, filename=uf.name)
-            parsed.append(doc)
+            l = parse_liquidacion_pdf(data, filename=uf.name)
+            liqs.append(l)
 
             preview_rows.append({
                 "Archivo": uf.name,
-                "Fecha": doc.fecha,
-                "Localidad": doc.localidad,
-                "COE": doc.coe,
-                "Tipo": doc.tipo_cbte,
-                "Acopio/Comprador": doc.acopio.razon_social,
-                "CUIT Comprador": doc.acopio.cuit,
-                "Grano": doc.grano,
-                "Kg": doc.kilos,
-                "Precio/Kg": doc.precio,
-                "Neto": doc.neto,
-                "Alic IVA": doc.alic_iva,
-                "IVA": doc.iva,
-                "Ret IVA": doc.ret_iva,
-                "Total": doc.total,
+                "Fecha": l.fecha,
+                "COE": l.coe,
+                "CUIT Comprador": l.comprador.cuit,
+                "Grano": l.grano,
+                "Campaña": l.campaña,
+                "Kg": l.kilos,
+                "Precio/Kg": l.precio,
+                "Neto": l.neto,
+                "Alic IVA": l.alic_iva,
+                "IVA": l.iva,
+                "Ret IVA": l.ret_iva,   # <- ya viene del cuadro RETENCIONES (monto)
+                "Total": l.total,
             })
 
     st.subheader("Vista previa")
     df = pd.DataFrame(preview_rows)
 
     df_show = df.copy()
-    for col in ["Kg","Precio/Kg","Neto","IVA","Ret IVA","Total"]:
+    for col in ["Kg", "Precio/Kg", "Neto", "IVA", "Ret IVA", "Total"]:
         if col in df_show.columns:
             df_show[col] = df_show[col].apply(fmt_amount)
     if "Alic IVA" in df_show.columns:
@@ -90,32 +89,27 @@ if pdf_files:
     st.dataframe(df_show, use_container_width=True, hide_index=True)
 
     col1, col2, col3 = st.columns(3)
+
     with col1:
-        dfv = build_ventas_rows(parsed)
-        out = df_to_xlsx_bytes(dfv, sheet_name="Ventas")
         st.download_button(
             "Descargar Ventas",
-            data=out,
+            data=ventas_xlsx_bytes(liqs),
             file_name="ventas.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
     with col2:
-        dfc = build_cpns_rows(parsed)
-        out = df_to_xlsx_bytes(dfc, sheet_name="CPNs")
         st.download_button(
             "Descargar CPNs",
-            data=out,
+            data=cpns_xlsx_bytes(liqs),
             file_name="cpns.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
     with col3:
-        dfg = build_gastos_rows(parsed)
-        out = df_to_xlsx_bytes(dfg, sheet_name="Gastos")
         st.download_button(
             "Descargar Gastos",
-            data=out,
+            data=gastos_xlsx_bytes(liqs),
             file_name="gastos.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
