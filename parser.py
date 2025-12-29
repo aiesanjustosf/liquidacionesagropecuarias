@@ -440,19 +440,23 @@ def _extract_me_items(full_text: str) -> List[MercaderiaEntregadaItem]:
 
 def _extract_retenciones(full_text: str) -> Tuple[float, float]:
     """
-    Lee el MONTO de la columna 'Retenciones' (no la Base Cálculo ni la Alícuota).
-    Regla: tomar el PRIMER importe monetario inmediatamente después del '%'
-    dentro de la fila correspondiente.
+    Lee el MONTO de la columna 'Retenciones' del cuadro RETENCIONES.
+    Soporta 2 variantes reales del PDF:
+      A) ... 5% $ 479,167.92 (Regimen...) 9,583,358.40   -> toma 479,167.92
+      B) ... 5%  <base> <ret>                              -> toma el que cumpla ret≈base*5%
+    Ganancias sólo se devuelve si el monto > 0.
     """
-    up = _norm(full_text)
+
+    up = (full_text or "").upper()
     s = up.find("RETENCIONES")
     if s == -1:
         return 0.0, 0.0
 
-    # Cerrar el bloque antes de la sección siguiente
+    # Cortar la sección RETENCIONES
     end_candidates = []
-    for token in ["GRADO", "CONDICIONES", "OTROS", "MERCADERIA ENTREGADA", "IMPORTES TOTALES", "FIRMA"]:
-        idx = up.find(token, s)
+    for token in ["GRADO", "CONDICIONES", "OTROS", "MERCADERIA ENTREGADA", "MERCADERÍA ENTREGADA",
+                  "IMPORTES TOTALES", "OPERACIÓN", "OPERACION", "FIRMA"]:
+        idx = up.find(token, s + 1)
         if idx != -1:
             end_candidates.append(idx)
     e = min(end_candidates) if end_candidates else len(full_text)
@@ -460,25 +464,71 @@ def _extract_retenciones(full_text: str) -> Tuple[float, float]:
     sec = full_text[s:e]
     sec_compact = re.sub(r"\s+", " ", sec)
 
-    def amount_after_percent(row_regex: str) -> float:
-        # Captura: ... <num>% $ <monto>
-        m = re.search(
-            row_regex + r".*?\b\d+(?:[.,]\d+)*\b\s*%\s*\$?\s*([0-9][0-9.,]*)",
-            sec_compact,
-            flags=re.IGNORECASE,
-        )
-        if not m:
+    def _parse_after_percent(snippet: str) -> float:
+        """
+        Dado un snippet que contiene '... <p>% ...', extrae el monto de retención.
+        Prioridad:
+          1) primer número precedido por '$' después del '%'
+          2) si no hay '$': tomar 2 números y elegir el que cumpla ret≈base*(p/100)
+        """
+        mperc = re.search(r"(\d[\d.,]*)\s*%", snippet)
+        if not mperc:
             return 0.0
-        return float(parse_number(m.group(1)) or 0.0)
+        p = parse_number(mperc.group(1)) or 0.0
+        if abs(p) < 1e-12:
+            return 0.0
 
-    # IVA: fila que contenga "IVA" y "RET" / "RETENCION"
-    ret_iva = amount_after_percent(r"(?:I\.?V\.?A\.?|IVA).*?(?:RET|RETENCION)")
-    # Ganancias: fila de Ganancias
-    ret_gan = amount_after_percent(r"GANANCIAS.*?(?:RET|RETENCION)")
+        tail = snippet[mperc.end():]  # texto luego del %
+        tail = tail.strip()
 
-    if abs(ret_iva) < 1e-9:
+        # 1) caso con $ (retención explícita)
+        m_money = re.search(r"\$\s*([0-9][0-9.,]*)", tail)
+        if m_money:
+            return float(parse_number(m_money.group(1)) or 0.0)
+
+        # 2) caso sin $ (suele venir: base ret)
+        nums = [parse_number(x) for x in re.findall(r"[-]?\d[\d.,]*", tail)]
+        nums = [float(x) for x in nums if x is not None]
+
+        # usar los 2 primeros "grandes" (base/ret)
+        big = [x for x in nums if abs(x) >= 1]
+        if len(big) >= 2:
+            a, b = big[0], big[1]
+            # decidir cuál es base y cuál ret por relación matemática
+            # probar (a base, b ret) y (b base, a ret)
+            exp1 = a * (p / 100.0)
+            err1 = abs(b - exp1) / max(1.0, abs(exp1))
+
+            exp2 = b * (p / 100.0)
+            err2 = abs(a - exp2) / max(1.0, abs(exp2))
+
+            if err1 <= err2 and err1 <= 0.02:
+                return float(b)
+            if err2 < err1 and err2 <= 0.02:
+                return float(a)
+
+        return 0.0
+
+    def _sum_rows(row_regex: str) -> float:
+        total = 0.0
+        for m in re.finditer(row_regex, sec_compact, flags=re.IGNORECASE):
+            # tomar una ventana razonable desde el match para capturar % y montos
+            snippet = sec_compact[m.start(): m.start() + 220]
+            amt = _parse_after_percent(snippet)
+            if amt and abs(amt) > 1e-9:
+                total += amt
+        return float(total)
+
+    # IVA: sumar todas las filas de IVA del cuadro
+    ret_iva = _sum_rows(r"(?:I\.?V\.?A\.?|IVA).*?(?:RET|RETENCION)")
+
+    # GAN: sumar, pero en tus PDFs suele ser 0; si es 0 no devuelve nada
+    ret_gan = _sum_rows(r"(?:GANANCIAS|RET\.?\s*GAN|RET\s*GAN).*?(?:RET|RETENCION)")
+
+    # si es ~0, dejar en 0 para que no se exporte
+    if abs(ret_iva) < 1e-6:
         ret_iva = 0.0
-    if abs(ret_gan) < 1e-9:
+    if abs(ret_gan) < 1e-6:
         ret_gan = 0.0
 
     return ret_iva, ret_gan
