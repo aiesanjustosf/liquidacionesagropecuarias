@@ -10,8 +10,6 @@ from typing import List, Optional, Tuple
 import pdfplumber
 
 
-# ------------------------- Helpers -------------------------
-
 def _norm(s: str) -> str:
     if s is None:
         return ""
@@ -69,8 +67,6 @@ def parse_cuit_digits(raw: str) -> str:
     return d[:11] if len(d) >= 11 else d
 
 
-# ------------------------- Domain -------------------------
-
 @dataclass
 class Party:
     razon_social: str = ""
@@ -125,7 +121,6 @@ class Liquidacion:
     total: float
     campaña: str
 
-    # MERCADERIA ENTREGADA (simple)
     me_nro_comprobante: str
     me_grado: str
     me_factor: Optional[float]
@@ -134,7 +129,7 @@ class Liquidacion:
     me_procedencia: str
 
     ret_iva: float
-    ret_gan: float
+    ret_gan: float  # se deja por compatibilidad, pero queda siempre 0
     deducciones: List[DeductionLine]
 
 
@@ -306,8 +301,10 @@ def _extract_parties_from_layout(page: pdfplumber.page.Page) -> Tuple[Party, Par
 
 
 def _extract_grain(page_text: str) -> Tuple[str, str]:
-    m = re.search(r"\b(Soja|Ma[ií]z|Trigo|Girasol|Arveja|Sorgo|Camelina\s*Sativa)\b",
-                  page_text, flags=re.IGNORECASE)
+    m = re.search(
+        r"\b(Soja|Ma[ií]z|Trigo|Girasol|Arveja|Sorgo|Camelina\s*Sativa)\b",
+        page_text, flags=re.IGNORECASE
+    )
     if not m:
         return "", ""
     grain_raw = m.group(1)
@@ -336,8 +333,7 @@ def _extract_grain(page_text: str) -> Tuple[str, str]:
 def _extract_operation_numbers(page_text: str) -> Tuple[float, float, float, float, float, float]:
     m = re.search(
         r"\n\s*([0-9][0-9.,]*)\s*Kg\s*\$?\s*([0-9][0-9.,]*)\s*\$?\s*([0-9][0-9.,]*)\s*([0-9][0-9.,]*)\s*\$?\s*([0-9][0-9.,]*)\s*\$?\s*([0-9][0-9.,]*)",
-        page_text,
-        flags=re.IGNORECASE,
+        page_text, flags=re.IGNORECASE,
     )
     if not m:
         return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
@@ -375,8 +371,7 @@ def _extract_me(page_text: str) -> Tuple[str, str, Optional[float], Optional[flo
 
     mrow = re.search(
         r"\b(\d{10,14})\b\s+([A-Z0-9]{1,4})\s+([0-9][0-9.,]*)\s+([0-9][0-9.,]*)\s+([0-9][0-9.,]*)",
-        sec,
-        flags=re.IGNORECASE,
+        sec, flags=re.IGNORECASE,
     )
     if mrow:
         nro = mrow.group(1).strip()
@@ -393,14 +388,12 @@ def _extract_me(page_text: str) -> Tuple[str, str, Optional[float], Optional[flo
     return nro, grado, factor, prot, peso, proced
 
 
-# ------------------------- RETENCIONES (FIX DEFINITIVO) -------------------------
-
 def _extract_retenciones(page_text: str) -> Tuple[float, float]:
     """
-    Retenciones:
-    - SOLO IVA (RA07): toma el MONTO de la columna 'Retenciones' del cuadro RETENCIONES.
-    - Ganancias: ignoradas (ret_gan = 0.0 siempre).
-    - Nunca toma % ni Base Cálculo.
+    SOLO IVA:
+    - Busca sección RETENCIONES.
+    - Toma el MONTO 'Retenciones' (no % ni base).
+    - Ignora Ganancias: ret_gan=0.0
     """
     up = (page_text or "").upper()
     s = up.find("RETENCIONES")
@@ -419,66 +412,51 @@ def _extract_retenciones(page_text: str) -> Tuple[float, float]:
     e = min(stop_candidates) if stop_candidates else len(page_text)
 
     sec = page_text[s:e]
-    sec_compact = re.sub(r"\s+", " ", sec)
+    lines = [ln.strip() for ln in sec.splitlines() if ln.strip()]
 
-    def pick_amount(win: str) -> float:
-        mperc = re.search(r"(\d[\d.,]*)\s*%", win)
+    def amount_from_line_with_percent(line: str) -> float:
+        # requerimos % para no confundir con netos/totales
+        mperc = re.search(r"(\d[\d.,]*)\s*%", line)
         if not mperc:
             return 0.0
         p = parse_number(mperc.group(1)) or 0.0
         if abs(p) < 1e-12:
             return 0.0
 
-        tail = win[mperc.end():].strip()
+        tail = line[mperc.end():]
 
-        # Caso A: luego del % viene $ <monto retención>
+        # Caso con $
         mm = re.search(r"\$\s*([0-9][0-9.,]*)", tail)
         if mm:
             return float(parse_number(mm.group(1)) or 0.0)
 
-        # Caso B: luego del % vienen 2 importes (Base y Retención) sin $
+        # Caso sin $: base y retención
         nums = [parse_number(x) for x in re.findall(r"[-]?\d[\d.,]*", tail)]
         nums = [float(x) for x in nums if x is not None and abs(x) > 0]
-
         if len(nums) >= 2:
-            a, b = nums[0], nums[1]
-            exp1 = a * (p / 100.0)
-            err1 = abs(b - exp1) / max(1.0, abs(exp1))
+            base, ret = nums[0], nums[1]
+            exp = base * (p / 100.0)
+            if abs(ret - exp) / max(1.0, abs(exp)) <= 0.03:
+                return float(ret)
 
-            exp2 = b * (p / 100.0)
-            err2 = abs(a - exp2) / max(1.0, abs(exp2))
-
-            if err1 <= err2 and err1 <= 0.03:
-                return float(b)
-            if err2 < err1 and err2 <= 0.03:
-                return float(a)
+            # fallback: si vienen invertidos
+            exp2 = ret * (p / 100.0)
+            if abs(base - exp2) / max(1.0, abs(exp2)) <= 0.03:
+                return float(base)
 
         return 0.0
 
-    def sum_iva_rows() -> float:
-        tot = 0.0
+    ret_iva = 0.0
+    for ln in lines:
+        ln_norm = _norm(ln)
+        # IVA (varios formatos)
+        if ("IVA" in ln_norm or "I V A" in ln_norm) and "%" in ln:
+            ret_iva += amount_from_line_with_percent(ln)
 
-        # Anclas típicas: "RET IVA" o "IVA" dentro del cuadro
-        patterns = [r"\bRET\s*IVA\b", r"\bI\.?V\.?A\.?\b", r"\bIVA\b"]
-
-        for pat in patterns:
-            for m in re.finditer(pat, sec_compact, flags=re.IGNORECASE):
-                win = sec_compact[m.start(): m.start() + 260]
-                amt = pick_amount(win)
-                if amt and abs(amt) > 1e-9:
-                    tot += amt
-            if tot > 0:
-                break  # si ya encontró por la ancla más específica, no repetir
-
-        return float(tot)
-
-    ret_iva = sum_iva_rows()
     if abs(ret_iva) < 1e-6:
         ret_iva = 0.0
 
-    # Ganancias ignoradas
-    return ret_iva, 0.0
-
+    return float(ret_iva), 0.0
 
 
 def _extract_deducciones(page_text: str) -> List[DeductionLine]:
@@ -521,12 +499,7 @@ def _extract_deducciones(page_text: str) -> List[DeductionLine]:
             out.append(DeductionLine(concepto=concepto, neto=total, alic=0.0, iva=iva, total=total2))
             continue
 
-    cleaned: List[DeductionLine] = []
-    for d in out:
-        if _norm(d.concepto) in {"COMISION O GASTOS", "ADMINISTRATIVOS", "OTRAS DEDUCCIONES"}:
-            continue
-        cleaned.append(d)
-    return cleaned
+    return out
 
 
 def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
@@ -536,7 +509,6 @@ def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
         page0_text = page0.extract_text() or ""
 
     full_norm = _norm(full_text)
-
     fecha, localidad = _extract_header_date_loc(page0_text)
     tipo_cbte = _detect_tipo_cbte(full_norm)
 
@@ -589,6 +561,6 @@ def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
         me_peso_kg=me_peso,
         me_procedencia=me_proced,
         ret_iva=ret_iva,
-        ret_gan=ret_gan,
+        ret_gan=0.0,
         deducciones=deducciones,
     )
