@@ -5,6 +5,8 @@ from io import BytesIO
 from typing import List, Dict, Any
 import pandas as pd
 
+from openpyxl import load_workbook
+
 from parser import Liquidacion
 
 
@@ -29,11 +31,10 @@ def build_ventas_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
     rows: List[Dict[str, Any]] = []
 
     for l in liqs:
-        # Main sale row
         rows.append({
             "Fecha dd/mm/aaaa": l.fecha,
-            "Cpbte": l.tipo_cbte,          # F1/F2
-            "Tipo": l.letra,              # A
+            "Cpbte": l.tipo_cbte,
+            "Tipo": l.letra,
             "Suc.": l.pv,
             "Número": l.numero,
             "Razón Social o Denominación Cliente ": (l.acopio.razon_social or "").strip(),
@@ -56,11 +57,9 @@ def build_ventas_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
             "Total": l.total,
         })
 
-        # Retentions: IVA and Ganancias only, each in its own line
-        def add_ret(code: str, amount: float):
-            amt = float(amount or 0.0)
-            if abs(amt) < 1e-9:
-                return
+        # SOLO RA07 (IVA). Ganancias NO se exportan.
+        amt = float(l.ret_iva or 0.0)
+        if abs(amt) > 1e-9:
             rows.append({
                 "Fecha dd/mm/aaaa": l.fecha,
                 "Cpbte": "RV",
@@ -81,64 +80,50 @@ def build_ventas_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
                 "IVA Débito": "",
                 "Cód. NG/EX": "",
                 "Conceptos NG/EX": "",
-                "Cód. P/R": code,
+                "Cód. P/R": "RA07",
                 "Perc./Ret.": amt,
                 "Pcia P/R": "",
                 "Total": amt,
             })
 
-        add_ret("RA07", l.ret_iva)
-        add_ret("RA05", l.ret_gan)
-
-    df = pd.DataFrame(rows, columns=VENTAS_COLUMNS)
-    return df
+    return pd.DataFrame(rows, columns=VENTAS_COLUMNS)
 
 
 def build_cpns_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
     rows = []
     for l in liqs:
-        comprobante = f"{l.tipo_cbte}-{l.letra}-{l.pv}-{l.numero}"
+        comprobante = f"{l.pv}-{l.numero}"  # si querés solo 3302-29912534
         rows.append({
             "FECHA": l.fecha,
+            "COE": l.coe,
             "COMPROBANTE": comprobante,
             "ACOPIO": (l.acopio.razon_social or "").strip(),
+            "CUIT": l.acopio.cuit,
             "TIPO DE GRANO": l.grano,
             "CAMPAÑA": l.campaña or "",
             "CANTIDAD DE KILOS": l.kilos,
             "PRECIO": l.precio,
-            "LOCALIDAD": l.localidad,
-            "ME - Nro comprobante": l.me_nro_comprobante,
-            "ME - Grado": l.me_grado,
-            "ME - Factor": l.me_factor if l.me_factor is not None else "",
-            "ME - Contenido proteico": l.me_contenido_proteico if l.me_contenido_proteico is not None else "",
-            "ME - Procedencia": l.me_procedencia,
-            "ME - Peso (kg)": l.me_peso_kg if l.me_peso_kg is not None else "",
+            "NETO": l.neto,
+            "ALIC IVA": l.alic_iva,
+            "IVA": l.iva,
+            "TOTAL": l.total,
         })
     return pd.DataFrame(rows)
 
 
 def build_gastos_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
-    """
-    Modelo compras (HWCpra1):
-    - Proveedor = acopio (encabezado)
-    - Tipo de movimiento: 203 por defecto; si IVA 21% => 202
-    - Exento (alíc 0%) puede ir en la misma línea.
-    - Si hay dos alícuotas (10.5 y 21) => líneas separadas.
-    """
     rows: List[Dict[str, Any]] = []
 
     for l in liqs:
         exento_total = 0.0
-        by_alic = {}  # alic -> (neto, iva)
+        by_alic = {}
         for d in l.deducciones:
             if (d.alic or 0) == 0:
                 exento_total += (d.total if d.total else d.neto)
             else:
-                neto = d.neto
-                iva = d.iva
                 by_alic.setdefault(d.alic, [0.0, 0.0])
-                by_alic[d.alic][0] += neto
-                by_alic[d.alic][1] += iva
+                by_alic[d.alic][0] += d.neto
+                by_alic[d.alic][1] += d.iva
 
         alics_sorted = sorted(by_alic.keys())
         if alics_sorted:
@@ -203,12 +188,75 @@ def build_gastos_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
                 "Total": exento_total if exento_total else 0.0,
             })
 
-    df = pd.DataFrame(rows, columns=COMPRAS_COLUMNS)
-    return df
+    return pd.DataFrame(rows, columns=COMPRAS_COLUMNS)
+
+
+def _apply_number_formats(xlsx_bytes: bytes, sheet_name: str) -> bytes:
+    """
+    Fuerza formato visual:
+      - Montos: 1.000,00  -> '#.##0,00'
+      - Alícuotas: 10,000 -> '0,000'
+      - Precio con $: '"$"#.##0,00'
+    Mantiene los valores como numéricos.
+    """
+    bio = BytesIO(xlsx_bytes)
+    wb = load_workbook(bio)
+    ws = wb[sheet_name]
+
+    # header -> col idx
+    header = [c.value for c in ws[1]]
+    col = {h: i + 1 for i, h in enumerate(header)}
+
+    money_fmt = '#.##0,00'
+    aliq_fmt = '0,000'
+    price_fmt = '"$"#.##0,00'
+
+    def set_fmt(colname: str, fmt: str):
+        if colname not in col:
+            return
+        j = col[colname]
+        for r in range(2, ws.max_row + 1):
+            cell = ws.cell(row=r, column=j)
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = fmt
+
+    # Ventas
+    if sheet_name == "Ventas":
+        set_fmt("Neto Gravado", money_fmt)
+        set_fmt("IVA Liquidado", money_fmt)
+        set_fmt("IVA Débito", money_fmt)
+        set_fmt("Perc./Ret.", money_fmt)
+        set_fmt("Total", money_fmt)
+        set_fmt("Alíc.", aliq_fmt)
+
+    # CPNs (según el build_cpns_rows que te dejé arriba)
+    if sheet_name == "CPNs":
+        set_fmt("CANTIDAD DE KILOS", money_fmt)
+        set_fmt("PRECIO", price_fmt)
+        set_fmt("NETO", money_fmt)
+        set_fmt("IVA", money_fmt)
+        set_fmt("TOTAL", money_fmt)
+        set_fmt("ALIC IVA", aliq_fmt)
+
+    # Gastos
+    if sheet_name == "Gastos":
+        set_fmt("Neto Gravado", money_fmt)
+        set_fmt("IVA Liquidado", money_fmt)
+        set_fmt("IVA Crédito", money_fmt)
+        set_fmt("Conceptos NG/EX", money_fmt)
+        set_fmt("Perc./Ret.", money_fmt)
+        set_fmt("Total", money_fmt)
+        set_fmt("Alíc.", aliq_fmt)
+
+    out = BytesIO()
+    wb.save(out)
+    return out.getvalue()
 
 
 def df_to_xlsx_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
-    return output.getvalue()
+
+    xlsx = output.getvalue()
+    return _apply_number_formats(xlsx, sheet_name=sheet_name)
