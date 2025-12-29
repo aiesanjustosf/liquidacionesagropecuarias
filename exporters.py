@@ -262,26 +262,38 @@ def build_excel_gastos(liqs: List[Liquidacion]) -> BytesIO:
 
 def build_excel_cpns(liqs: List[Liquidacion]) -> BytesIO:
     """
+    CPNs en UNA sola hoja.
     - COMPROBANTE: 3302-29912534 (pv-numero)
-    - Hoja 1: CPNs
-    - Hoja 2: Mercadería Entregada (varias líneas si hay varias filas)
+    - Si hay varios ítems de Mercadería Entregada -> varias filas (repitiendo datos base)
+    - Retenciones: importes (no %), vienen del parser corregido
     """
     wb = Workbook()
     ws = wb.active
     ws.title = "CPNs"
 
-    h1 = [
+    headers = [
         "FECHA",
         "COE",
         "COMPROBANTE",
-        "ACOPIO",
+        "ACOPIO/COMPRADOR",
+        "CUIT COMPRADOR",
         "TIPO DE GRANO",
         "CAMPAÑA",
-        "CANTIDAD DE KILOS",
+        "KILOS",
         "PRECIO",
-        "LOCALIDAD",
+        "NETO",
+        "IVA",
+        "TOTAL",
+        "RET IVA",
+        "RET GAN",
+        "ME - Nro comprobante",
+        "ME - Grado",
+        "ME - Factor",
+        "ME - Contenido proteico",
+        "ME - Procedencia",
+        "ME - Peso (kg)",
     ]
-    ws.append(h1)
+    ws.append(headers)
 
     bold = Font(bold=True)
     for c in ws[1]:
@@ -291,50 +303,10 @@ def build_excel_cpns(liqs: List[Liquidacion]) -> BytesIO:
 
     for l in liqs:
         comp = f"{l.pv}-{l.numero}" if (l.pv and l.numero) else ""
-        ws.append([
-            l.fecha or "",
-            l.coe or "",
-            comp,
-            (l.acopio.razon_social or "").strip(),
-            l.grano or "",
-            l.campaña or "",
-            float(l.kilos or 0),
-            float(l.precio or 0),
-            l.localidad or "",
-        ])
 
-    # formatos hoja 1
-    col_idx = {h: i + 1 for i, h in enumerate(h1)}
-    for r in range(2, ws.max_row + 1):
-        ws.cell(r, col_idx["CANTIDAD DE KILOS"]).number_format = FMT_NUM2
-        ws.cell(r, col_idx["PRECIO"]).number_format = FMT_MONEY
-
-    _set_col_widths(ws, [12,14,16,40,18,14,18,12,18])
-
-    # Hoja 2: Mercadería Entregada
-    ws2 = wb.create_sheet("Mercadería Entregada")
-    h2 = [
-        "FECHA",
-        "COMPROBANTE",
-        "ME - Nro comprobante",
-        "ME - Grado",
-        "ME - Factor",
-        "ME - Contenido proteico",
-        "ME - Procedencia",
-        "ME - Peso (kg)",
-    ]
-    ws2.append(h2)
-    for c in ws2[1]:
-        c.font = bold
-        c.alignment = Alignment(vertical="center")
-    ws2.freeze_panes = "A2"
-
-    for l in liqs:
-        comp = f"{l.pv}-{l.numero}" if (l.pv and l.numero) else ""
-
+        # lista de mercadería entregada (si no existe, caer al legacy)
         me_items = getattr(l, "me_items", None) or []
         if not me_items and (l.me_nro_comprobante or ""):
-            # compatibilidad si todavía no tenés la lista
             me_items = [{
                 "nro": l.me_nro_comprobante,
                 "grado": l.me_grado,
@@ -344,10 +316,26 @@ def build_excel_cpns(liqs: List[Liquidacion]) -> BytesIO:
                 "proced": l.me_procedencia,
             }]
 
+        # si no hay nada, igual una fila base
+        if not me_items:
+            me_items = [{}]
+
         for it in me_items:
-            ws2.append([
+            ws.append([
                 l.fecha or "",
+                l.coe or "",
                 comp,
+                (l.comprador.razon_social or "").strip(),
+                (l.comprador.cuit or "").replace("-", ""),
+                l.grano or "",
+                l.campaña or "",
+                float(l.kilos or 0),
+                float(l.precio or 0),
+                float(l.neto or 0),
+                float(l.iva or 0),
+                float(l.total or 0),
+                float(l.ret_iva or 0),
+                float(l.ret_gan or 0),
                 it.get("nro", "") or "",
                 it.get("grado", "") or "",
                 it.get("factor", "") if it.get("factor", None) is not None else "",
@@ -356,16 +344,27 @@ def build_excel_cpns(liqs: List[Liquidacion]) -> BytesIO:
                 it.get("peso", "") if it.get("peso", None) is not None else "",
             ])
 
-    # formatos hoja 2
-    col2 = {h: i + 1 for i, h in enumerate(h2)}
-    for r in range(2, ws2.max_row + 1):
-        ws2.cell(r, col2["ME - Factor"]).number_format = FMT_NUM2
-        ws2.cell(r, col2["ME - Contenido proteico"]).number_format = FMT_NUM2
-        ws2.cell(r, col2["ME - Peso (kg)"]).number_format = FMT_NUM2
+    # formatos
+    idx = {h: i + 1 for i, h in enumerate(headers)}
+    for r in range(2, ws.max_row + 1):
+        ws.cell(r, idx["KILOS"]).number_format = FMT_NUM2
+        ws.cell(r, idx["PRECIO"]).number_format = FMT_MONEY
+        ws.cell(r, idx["NETO"]).number_format = FMT_NUM2
+        ws.cell(r, idx["IVA"]).number_format = FMT_NUM2
+        ws.cell(r, idx["TOTAL"]).number_format = FMT_NUM2
+        ws.cell(r, idx["RET IVA"]).number_format = FMT_NUM2
+        ws.cell(r, idx["RET GAN"]).number_format = FMT_NUM2
+        ws.cell(r, idx["ME - Factor"]).number_format = FMT_NUM2
+        ws.cell(r, idx["ME - Contenido proteico"]).number_format = FMT_NUM2
+        ws.cell(r, idx["ME - Peso (kg)"]).number_format = FMT_NUM2
 
-    _set_col_widths(ws2, [12,16,18,12,12,20,20,14])
+    _set_col_widths(ws, [
+        12, 14, 16, 40, 14, 18, 12, 14, 14, 14, 14, 14, 12, 12,
+        18, 12, 12, 20, 22, 14
+    ])
 
     out = BytesIO()
     wb.save(out)
     out.seek(0)
     return out
+
