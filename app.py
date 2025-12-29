@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import pandas as pd
 from pathlib import Path
@@ -39,56 +38,51 @@ pdf_files = st.file_uploader(
 def fmt_amount(x):
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return ""
-    try:
-        v = float(x)
-    except Exception:
-        return x
-    return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    if isinstance(x, (int, float)):
+        return f"{x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return x
 
 def fmt_aliq(x):
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return ""
-    try:
-        v = float(x)
-    except Exception:
-        return x
-    return f"{v:,.3f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    if isinstance(x, (int, float)):
+        return f"{x:,.3f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return x
 
 if pdf_files:
-    docs = []
+    parsed = []
     preview_rows = []
 
     with st.spinner("Procesando PDFs..."):
         for uf in pdf_files:
             data = uf.read()
             doc = parse_liquidacion_pdf(data, filename=uf.name)
-            docs.append(doc)
+            parsed.append(doc)
 
             preview_rows.append({
                 "Archivo": uf.name,
                 "Fecha": doc.fecha,
                 "Localidad": doc.localidad,
                 "COE": doc.coe,
-                "CUIT Comprador": doc.acopio.cuit,
+                "Tipo": doc.tipo_cbte,
                 "Acopio/Comprador": doc.acopio.razon_social,
+                "CUIT Comprador": doc.acopio.cuit,
                 "Grano": doc.grano,
-                "Campaña": doc.campaña,
                 "Kg": doc.kilos,
                 "Precio/Kg": doc.precio,
-                "Neto": doc.neto,
+                "Subtotal": doc.neto,
                 "Alic IVA": doc.alic_iva,
                 "IVA": doc.iva,
-                "Percep IVA": doc.percep_iva,
+                "Total": doc.total,
                 "Ret IVA": doc.ret_iva,
                 "Ret Gan": doc.ret_gan,
-                "Total": doc.total,
             })
 
     st.subheader("Vista previa")
     df = pd.DataFrame(preview_rows)
 
     df_show = df.copy()
-    for col in ["Kg", "Precio/Kg", "Neto", "IVA", "Percep IVA", "Ret IVA", "Ret Gan", "Total"]:
+    for col in ["Kg","Precio/Kg","Subtotal","IVA","Total","Ret IVA","Ret Gan"]:
         if col in df_show.columns:
             df_show[col] = df_show[col].apply(fmt_amount)
     if "Alic IVA" in df_show.columns:
@@ -97,9 +91,8 @@ if pdf_files:
     st.dataframe(df_show, use_container_width=True, hide_index=True)
 
     col1, col2, col3 = st.columns(3)
-
     with col1:
-        dfv = build_ventas_rows(docs)
+        dfv = build_ventas_rows(parsed)
         out = df_to_xlsx_bytes(dfv, sheet_name="Ventas")
         st.download_button(
             "Descargar Ventas",
@@ -108,9 +101,8 @@ if pdf_files:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
-
     with col2:
-        dfc = build_cpns_rows(docs)
+        dfc = build_cpns_rows(parsed)
         out = df_to_xlsx_bytes(dfc, sheet_name="CPNs")
         st.download_button(
             "Descargar CPNs",
@@ -119,9 +111,8 @@ if pdf_files:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
-
     with col3:
-        dfg = build_gastos_rows(docs)
+        dfg = build_gastos_rows(parsed)
         out = df_to_xlsx_bytes(dfg, sheet_name="Gastos")
         st.download_button(
             "Descargar Gastos",
