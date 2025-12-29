@@ -16,12 +16,9 @@ LOGO_PATH = ASSETS_DIR / "logo_aie.png"
 
 
 def fmt_amount(x):
-    """1.000.000,00 (AR)"""
-    if x is None:
+    if x is None or (isinstance(x, float) and pd.isna(x)):
         return ""
     try:
-        if isinstance(x, str) and not x.strip():
-            return ""
         v = float(x)
         return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except Exception:
@@ -29,12 +26,9 @@ def fmt_amount(x):
 
 
 def fmt_aliq(x):
-    """10,500 (3 decimales AR)"""
-    if x is None:
+    if x is None or (isinstance(x, float) and pd.isna(x)):
         return ""
     try:
-        if isinstance(x, str) and not x.strip():
-            return ""
         v = float(x)
         return f"{v:,.3f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except Exception:
@@ -61,7 +55,7 @@ pdf_files = st.file_uploader(
 )
 
 if pdf_files:
-    parsed_docs = []
+    parsed = []
     preview_rows = []
 
     with st.spinner("Procesando PDFs..."):
@@ -69,30 +63,28 @@ if pdf_files:
             try:
                 data = uf.read()
                 doc = parse_liquidacion_pdf(data, filename=uf.name)
-                parsed_docs.append(doc)
+                parsed.append(doc)
 
-                preview_rows.append(
-                    {
-                        "Archivo": uf.name,
-                        "Fecha": getattr(doc, "fecha", ""),
-                        "Localidad": getattr(doc, "localidad", ""),
-                        "COE": getattr(doc, "coe", ""),
-                        "Tipo": getattr(doc, "tipo_comprobante", ""),
-                        "Acopio/Comprador": getattr(doc, "comprador_rs", ""),
-                        "CUIT Comprador": getattr(doc, "comprador_cuit", ""),
-                        "Grano": getattr(doc, "grano", ""),
-                        "Campaña": getattr(doc, "campaña", ""),
-                        "Kg": getattr(doc, "kilos", None),
-                        "Precio/Kg": getattr(doc, "precio_kg", None),
-                        "Subtotal": getattr(doc, "subtotal", None),
-                        "Alic IVA": getattr(doc, "alicuota_iva", None),
-                        "IVA": getattr(doc, "iva", None),
-                        "Percep IVA": getattr(doc, "perc_iva", None),
-                        "Ret IVA": getattr(doc, "ret_iva", None),
-                        "Ret Gan": getattr(doc, "ret_gan", None),
-                        "Total": getattr(doc, "total", None),
-                    }
-                )
+                preview_rows.append({
+                    "Archivo": uf.name,
+                    "Fecha": doc.fecha,
+                    "Localidad": doc.localidad,
+                    "COE": doc.coe,
+                    "Tipo": doc.tipo_cbte,
+                    "Acopio/Comprador": (doc.comprador.razon_social or "").strip(),
+                    "CUIT Comprador": doc.comprador.cuit,
+                    "Grano": doc.grano,
+                    "Campaña": doc.campaña or "",
+                    "Kg": doc.kilos,
+                    "Precio/Kg": doc.precio,
+                    "Neto": doc.neto,
+                    "Alic IVA": doc.alic_iva,
+                    "IVA": doc.iva,
+                    "Percep IVA": getattr(doc, "perc_iva", 0.0),
+                    "Ret IVA": doc.ret_iva,
+                    "Ret Gan": doc.ret_gan,
+                    "Total": doc.total,
+                })
             except Exception as e:
                 st.error(f"Error procesando {uf.name}: {e}")
 
@@ -101,11 +93,9 @@ if pdf_files:
         df = pd.DataFrame(preview_rows)
 
         df_show = df.copy()
-
-        for col in ["Kg", "Precio/Kg", "Subtotal", "IVA", "Percep IVA", "Ret IVA", "Ret Gan", "Total"]:
+        for col in ["Kg","Precio/Kg","Neto","IVA","Percep IVA","Ret IVA","Ret Gan","Total"]:
             if col in df_show.columns:
                 df_show[col] = df_show[col].apply(fmt_amount)
-
         if "Alic IVA" in df_show.columns:
             df_show["Alic IVA"] = df_show["Alic IVA"].apply(fmt_aliq)
 
@@ -114,7 +104,7 @@ if pdf_files:
         b1, b2, b3 = st.columns(3)
 
         with b1:
-            out = build_excel_ventas(parsed_docs)
+            out = build_excel_ventas(parsed)
             st.download_button(
                 "Descargar Ventas",
                 data=out.getvalue(),
@@ -124,7 +114,7 @@ if pdf_files:
             )
 
         with b2:
-            out = build_excel_cpns(parsed_docs)
+            out = build_excel_cpns(parsed)
             st.download_button(
                 "Descargar CPNs",
                 data=out.getvalue(),
@@ -134,7 +124,7 @@ if pdf_files:
             )
 
         with b3:
-            out = build_excel_gastos(parsed_docs)
+            out = build_excel_gastos(parsed)
             st.download_button(
                 "Descargar Gastos",
                 data=out.getvalue(),
