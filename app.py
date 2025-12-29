@@ -70,19 +70,18 @@ if pdf_files:
                 "Grano": doc.grano,
                 "Kg": doc.kilos,
                 "Precio/Kg": doc.precio,
-                "Subtotal": doc.neto,
+                "Neto": doc.neto,
                 "Alic IVA": doc.alic_iva,
                 "IVA": doc.iva,
-                "Total": doc.total,
                 "Ret IVA": doc.ret_iva,
-                "Ret Gan": doc.ret_gan,
+                "Total": doc.total,
             })
 
     st.subheader("Vista previa")
     df = pd.DataFrame(preview_rows)
 
     df_show = df.copy()
-    for col in ["Kg","Precio/Kg","Subtotal","IVA","Total","Ret IVA","Ret Gan"]:
+    for col in ["Kg","Precio/Kg","Neto","IVA","Ret IVA","Total"]:
         if col in df_show.columns:
             df_show[col] = df_show[col].apply(fmt_amount)
     if "Alic IVA" in df_show.columns:
