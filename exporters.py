@@ -13,9 +13,9 @@ from openpyxl.utils import get_column_letter
 from parser import Liquidacion
 
 # Formatos (Excel AR)
-FMT_NUM2 = "#.##0,00"
-FMT_NUM3 = "0,000"
-FMT_MONEY = '"$"#.##0,00'
+FMT_NUM2 = "#.##0,00"      # 87.300.000,00
+FMT_NUM3 = "0,000"         # 10,000
+FMT_MONEY = '"$"#.##0,00'  # $1.000,00
 FMT_CUIT = "0"
 
 
