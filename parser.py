@@ -539,52 +539,146 @@ def _extract_retenciones(full_text: str) -> Tuple[float, float]:
 # ------------------------- DEDUCCIONES -------------------------
 
 def _extract_deducciones(page_text: str) -> List[DeductionLine]:
+    # Between DEDUCCIONES and RETENCIONES
     up = page_text.upper()
     s = up.find("DEDUCCIONES")
     e = up.find("RETENCIONES")
     if s == -1 or e == -1 or e <= s:
         return []
-    sec = page_text[s:e]
-    lines = [l.strip() for l in sec.splitlines() if l.strip()]
-    out: List[DeductionLine] = []
 
-    for ln in lines:
-        if ln.lower().startswith("concepto") or "base cálculo" in ln.lower():
+    sec = page_text[s:e]
+    raw_lines = [l.strip() for l in sec.splitlines() if l.strip()]
+
+    out: List[DeductionLine] = []
+    pending_detail = ""
+    buffer = ""
+
+    pat_full = re.compile(
+        r"^(.*?)\s+\$?\s*([0-9][0-9.,]*)\s+([0-9][0-9.,]*)%?\s+\$?\s*([0-9][0-9.,]*)\s+\$?\s*([0-9][0-9.,]*)\s*$"
+    )
+    pat_zero = re.compile(
+        r"^(.*?)\s+\$?\s*([0-9][0-9.,]*)\s+0%?\s+\$?\s*([0-9][0-9.,]*)\s+\$?\s*([0-9][0-9.,]*)\s*$"
+    )
+
+    def looks_like_header(ln: str) -> bool:
+        n = _norm(ln)
+        if n.startswith("DEDUCCIONES"):
+            return True
+        # encabezados típicos de tabla
+        if "CONCEPTO" in n and ("ALICUOTA" in n or "ALÍCUOTA" in n):
+            return True
+        if "BASE" in n and ("CALC" in n or "CÁLC" in n):
+            return True
+        if "NETO" in n and "IVA" in n and "TOTAL" in n:
+            return True
+        return False
+
+    for ln in raw_lines:
+        if looks_like_header(ln):
             continue
 
         ln2 = re.sub(r"\s+", " ", ln)
 
-        m = re.search(
-            r"^(.*?)\s+\$?\s*([0-9][0-9.,]*)\s+([0-9][0-9.,]*)%?\s+\$?\s*([0-9][0-9.,]*)\s+\$?\s*([0-9][0-9.,]*)\s*$",
-            ln2
-        )
+        # Línea previa tipo "37711|Derechos..." que suele anteceder a la fila con importes.
+        # Si esa misma línea ya trae importes, NO la tratamos como pending.
+        if re.match(r"^\d{3,7}\|", ln2) and ("$" not in ln2) and (not pat_full.search(ln2)) and (not pat_zero.search(ln2)):
+            pending_detail = ln2
+            continue
+
+        candidate = (buffer + " " + ln2).strip() if buffer else ln2
+
+        m = pat_full.search(candidate)
+        m0 = None if m else pat_zero.search(candidate)
+
+        if not m and not m0:
+            # posible corte en 2 líneas: bufferizamos
+            if len(candidate) < 220:
+                buffer = candidate
+                continue
+            buffer = ""
+            continue
+
+        buffer = ""
+
         if m:
             concepto = m.group(1).strip()
             neto = parse_number(m.group(2)) or 0.0
             alic = parse_number(m.group(3)) or 0.0
             iva = parse_number(m.group(4)) or 0.0
             total = parse_number(m.group(5)) or 0.0
-            out.append(DeductionLine(concepto=concepto, neto=neto, alic=alic, iva=iva, total=total))
-            continue
-
-        m0 = re.search(
-            r"^(.*?)\s+\$?\s*([0-9][0-9.,]*)\s+0%?\s+\$?\s*([0-9][0-9.,]*)\s+\$?\s*([0-9][0-9.,]*)\s*$",
-            ln2
-        )
-        if m0:
+        else:
             concepto = m0.group(1).strip()
-            total = parse_number(m0.group(2)) or 0.0
+            total_base = parse_number(m0.group(2)) or 0.0
             iva = parse_number(m0.group(3)) or 0.0
-            total2 = parse_number(m0.group(4)) or total
-            out.append(DeductionLine(concepto=concepto, neto=total, alic=0.0, iva=iva, total=total2))
+            total = parse_number(m0.group(4)) or total_base
+            neto = total_base
+            alic = 0.0
+
+        if pending_detail:
+            concepto = f"{pending_detail} {concepto}".strip()
+            pending_detail = ""
+
+        out.append(DeductionLine(
+            concepto=concepto,
+            neto=float(neto),
+            alic=float(alic),
+            iva=float(iva),
+            total=float(total),
+        ))
+
+    return out
+def _extract_arancel_4905(page_text: str) -> float:
+    """
+    Extrae el monto del item 58487|Arancel Resolución 49/05 dentro del bloque RETENCIONES/OTROS.
+    Regla: si aparece '58487' o 'ARANCEL RESOLUCION', tomar el primer monto > 0 precedido por '$'
+    en esa línea o las siguientes (por si está cortado).
+    """
+    up = page_text.upper()
+    s = up.find("RETENCIONES")
+    if s == -1:
+        return 0.0
+
+    e_candidates = [
+        up.find("IMPORTES TOTALES", s),
+        up.find("IMPORTE NETO A PAGAR", s),
+        up.find("CONDICIONES DE LA OPERACION", s),
+        up.find("CONDICIONES DE LA OPERACIÓN", s),
+    ]
+    e_candidates = [e for e in e_candidates if e != -1]
+    e = min(e_candidates) if e_candidates else len(page_text)
+
+    sec = page_text[s:e]
+    lines = [re.sub(r"\s+", " ", l.strip()) for l in sec.splitlines() if l.strip()]
+
+    def amounts_after_dollar(line: str) -> List[float]:
+        vals: List[float] = []
+        for tok in re.findall(r"\$\s*([-]?\d[\d.,]*)", line):
+            v = parse_number(tok)
+            if v is None:
+                continue
+            vals.append(float(v))
+        return vals
+
+    pending = False
+    for ln in lines:
+        n = _norm(ln)
+
+        if ("58487" in ln) or ("ARANCEL" in n and "RESOLUCION" in n):
+            pending = True
+            vals = amounts_after_dollar(ln)
+            for v in reversed(vals):
+                if v > 0:
+                    return v
             continue
 
-    cleaned: List[DeductionLine] = []
-    for d in out:
-        if _norm(d.concepto) in {"COMISION O GASTOS", "ADMINISTRATIVOS", "OTRAS DEDUCCIONES"}:
-            continue
-        cleaned.append(d)
-    return cleaned
+        if pending:
+            vals = amounts_after_dollar(ln)
+            for v in reversed(vals):
+                if v > 0:
+                    return v
+
+    return 0.0
+
 
 
 def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
@@ -619,6 +713,17 @@ def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
 
     ret_iva, ret_gan = _extract_retenciones(full_text)
     deducciones = _extract_deducciones(full_text)
+    # Extra: 58487|Arancel Resolución 49/05 dentro de RETENCIONES/OTROS (se trata como deducción exenta)
+    ar_4905 = _extract_arancel_4905(full_text)
+    if ar_4905 and float(ar_4905) != 0.0:
+        deducciones.append(DeductionLine(
+            concepto="58487|Arancel Resolución 49/05",
+            neto=float(ar_4905),
+            alic=0.0,
+            iva=0.0,
+            total=float(ar_4905),
+        ))
+
 
     return Liquidacion(
         filename=filename,
