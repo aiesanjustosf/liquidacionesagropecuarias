@@ -17,7 +17,6 @@ from exporters import (
 
 APP_TITLE = "IA Liquidaciones Agropecuarias"
 
-# ----------------- Assets (logo + favicon) -----------------
 HERE = Path(__file__).parent
 
 def first_existing(*paths: Path):
@@ -30,6 +29,7 @@ LOGO_PATH = first_existing(
     HERE / "assets" / "logo_aie.png",
     HERE / "logo_aie.png",
 )
+
 FAVICON_PATH = first_existing(
     HERE / "assets" / "favicon-aie.ico",
     HERE / "favicon-aie.ico",
@@ -37,26 +37,30 @@ FAVICON_PATH = first_existing(
     HERE / "favicon-aie.png",
 )
 
-# IMPORTANTE: set_page_config primero
+def load_favicon(path: Path) -> Image.Image:
+    img = Image.open(path).convert("RGBA")
+    # Normaliza tamaño para que el navegador lo tome como favicon
+    img = img.resize((32, 32))
+    return img
+
+# IMPORTANTE: esto debe ser el primer st.* del archivo
 st.set_page_config(
     page_title=APP_TITLE,
-    page_icon=Image.open(FAVICON_PATH) if FAVICON_PATH else None,
+    page_icon=load_favicon(FAVICON_PATH) if FAVICON_PATH else None,
     layout="wide",
 )
 
-# ----------------- Header como en tu captura (logo izq + título) -----------------
-h1, h2 = st.columns([1, 12])
+# Header como tu referencia, pero con logo MÁS GRANDE y menos “gap”
+h1, h2 = st.columns([0.55, 12])  # achica la columna del logo para que no quede lejos del título
 with h1:
     if LOGO_PATH:
-        st.image(str(LOGO_PATH), width=70)  # ajustá 60–90 si querés
+        st.image(str(LOGO_PATH), width=120)  # subí/bajá 110–150 si querés
 with h2:
-    st.title(APP_TITLE)
+    st.markdown(f"<h1 style='margin:0; padding-top:6px;'>{APP_TITLE}</h1>", unsafe_allow_html=True)
 
-files = st.file_uploader(
-    "Subí una o más liquidaciones (PDF)",
-    type=["pdf"],
-    accept_multiple_files=True
-)
+# --- lo demás queda EXACTAMENTE igual ---
+files = st.file_uploader("Subí una o más liquidaciones (PDF)", type=["pdf"], accept_multiple_files=True)
+
 
 def _fmt_monto(x):
     try:
