@@ -15,27 +15,48 @@ from exporters import (
     df_to_xlsx_bytes,
 )
 
+APP_TITLE = "IA Liquidaciones Agropecuarias"
+
 # ----------------- Assets (logo + favicon) -----------------
 HERE = Path(__file__).parent
-ASSETS_DIR = HERE / "assets"
-LOGO_PATH = ASSETS_DIR / "logo_aie.png"
-FAVICON_PATH = ASSETS_DIR / "favicon-aie.ico"
 
+def first_existing(*paths: Path):
+    for p in paths:
+        if p and p.exists():
+            return p
+    return None
+
+LOGO_PATH = first_existing(
+    HERE / "assets" / "logo_aie.png",
+    HERE / "logo_aie.png",
+)
+FAVICON_PATH = first_existing(
+    HERE / "assets" / "favicon-aie.ico",
+    HERE / "favicon-aie.ico",
+    HERE / "assets" / "favicon-aie.png",
+    HERE / "favicon-aie.png",
+)
+
+# IMPORTANTE: set_page_config primero
 st.set_page_config(
-    page_title="IA Liquidaciones Agropecuarias",
-    page_icon=Image.open(FAVICON_PATH) if FAVICON_PATH.exists() else None,
+    page_title=APP_TITLE,
+    page_icon=Image.open(FAVICON_PATH) if FAVICON_PATH else None,
     layout="wide",
 )
 
-# ----------------- Header with logo -----------------
-c1, c2 = st.columns([1, 8])
-with c1:
-    if LOGO_PATH.exists():
-        st.image(str(LOGO_PATH), use_container_width=True)
-with c2:
-    st.title("IA Liquidaciones Agropecuarias")
+# ----------------- Header como en tu captura (logo izq + título) -----------------
+h1, h2 = st.columns([1, 12])
+with h1:
+    if LOGO_PATH:
+        st.image(str(LOGO_PATH), width=70)  # ajustá 60–90 si querés
+with h2:
+    st.title(APP_TITLE)
 
-files = st.file_uploader("Subí una o más liquidaciones (PDF)", type=["pdf"], accept_multiple_files=True)
+files = st.file_uploader(
+    "Subí una o más liquidaciones (PDF)",
+    type=["pdf"],
+    accept_multiple_files=True
+)
 
 def _fmt_monto(x):
     try:
@@ -54,7 +75,6 @@ if files:
     for f in files:
         liqs.append(parse_liquidacion_pdf(f.getvalue(), f.name))
 
-    # Vista previa (la grilla estaba bien: mantenemos formato visible)
     preview = pd.DataFrame([{
         "Archivo": l.filename,
         "CUIT Comprador": l.comprador.cuit,
@@ -118,7 +138,7 @@ if files:
             use_container_width=True,
         )
 
-# ----------------- Footer -----------------
+# ----------------- Footer fijo -----------------
 st.markdown(
     """
     <style>
