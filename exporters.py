@@ -135,62 +135,34 @@ def build_gastos_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
     - Proveedor = acopio (encabezado)
     - Cpbte = ND
     - Tipo = A
-    - Tipo de movimiento: 203 por defecto; si IVA 21% => 202
-    - Exento (alíc 0%) puede ir en la misma línea (en NG/EX)
-    - Si hay dos alícuotas (10.5 y 21) => líneas separadas.
+    - Gravado: 203 por defecto; si IVA 21% => 202
+    - Exento: NO se agrupa. Se genera 1 fila por cada deducción exenta detectada.
+      Código exento (Cód. NG/EX) = 202 (ajuste).
     """
     rows: List[Dict[str, Any]] = []
 
     for l in liqs:
-        exento_total = 0.0
-        by_alic = {}  # alic -> (neto, iva)
+        by_alic: Dict[float, List[float]] = {}  # alic -> [neto, iva]
+        exentos: List[float] = []               # importes exentos (uno por concepto)
 
         for d in (l.deducciones or []):
             alic = float(d.alic or 0.0)
+
             if abs(alic) < 0.000001:
-                exento_total += float(d.total if d.total else d.neto)
+                amt = float(d.total if d.total is not None else (d.neto or 0.0))
+                if abs(amt) > 0.000001:
+                    exentos.append(amt)
             else:
                 by_alic.setdefault(alic, [0.0, 0.0])
                 by_alic[alic][0] += float(d.neto or 0.0)
                 by_alic[alic][1] += float(d.iva or 0.0)
 
-        alics_sorted = sorted(by_alic.keys())
-        if alics_sorted:
-            for idx, alic in enumerate(alics_sorted):
-                neto, iva = by_alic[alic]
-                exento_here = exento_total if idx == 0 else 0.0
-                mov = 202 if abs(alic - 21.0) < 0.001 else 203
-                total = (neto or 0.0) + (iva or 0.0) + (exento_here or 0.0)
+        # 1) Líneas gravadas (una por alícuota)
+        for alic in sorted(by_alic.keys()):
+            neto, iva = by_alic[alic]
+            mov = 202 if abs(alic - 21.0) < 0.001 else 203
+            total = (neto or 0.0) + (iva or 0.0)
 
-                rows.append({
-                    "Fecha Emisión ": l.fecha,
-                    "Fecha Recepción": l.fecha,
-                    "Cpbte": "ND",
-                    "Tipo": l.letra,  # A
-                    "Suc.": l.pv,
-                    "Número": l.numero,
-                    "Razón Social/Denominación Proveedor": (l.acopio.razon_social or "").strip(),
-                    "Tipo Doc.": 80,
-                    "CUIT": _digits_to_int_or_none(l.acopio.cuit),
-                    "Domicilio": (l.acopio.domicilio or "").strip(),
-                    "C.P.": "",
-                    "Pcia": "",
-                    "Cond Fisc": l.acopio.cond_fisc,
-                    "Cód. Neto": mov,
-                    "Neto Gravado": float(neto or 0.0),
-                    "Alíc.": float(alic or 0.0),
-                    "IVA Liquidado": float(iva or 0.0),
-                    "IVA Crédito": float(iva or 0.0),
-                    "Cód. NG/EX": 203 if exento_here else "",
-                    "Conceptos NG/EX": float(exento_here) if exento_here else None,
-                    "Cód. P/R": "",
-                    "Perc./Ret.": None,
-                    "Pcia P/R": "",
-                    "Total": float(total or 0.0),
-                })
-        else:
-            # Only exento
-            mov = 203
             rows.append({
                 "Fecha Emisión ": l.fecha,
                 "Fecha Recepción": l.fecha,
@@ -206,16 +178,45 @@ def build_gastos_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
                 "Pcia": "",
                 "Cond Fisc": l.acopio.cond_fisc,
                 "Cód. Neto": mov,
+                "Neto Gravado": float(neto or 0.0),
+                "Alíc.": float(alic or 0.0),
+                "IVA Liquidado": float(iva or 0.0),
+                "IVA Crédito": float(iva or 0.0),
+                "Cód. NG/EX": "",
+                "Conceptos NG/EX": None,
+                "Cód. P/R": "",
+                "Perc./Ret.": None,
+                "Pcia P/R": "",
+                "Total": float(total or 0.0),
+            })
+
+        # 2) Líneas exentas (una por cada gasto exento detectado)
+        for amt in exentos:
+            rows.append({
+                "Fecha Emisión ": l.fecha,
+                "Fecha Recepción": l.fecha,
+                "Cpbte": "ND",
+                "Tipo": l.letra,  # A
+                "Suc.": l.pv,
+                "Número": l.numero,
+                "Razón Social/Denominación Proveedor": (l.acopio.razon_social or "").strip(),
+                "Tipo Doc.": 80,
+                "CUIT": _digits_to_int_or_none(l.acopio.cuit),
+                "Domicilio": (l.acopio.domicilio or "").strip(),
+                "C.P.": "",
+                "Pcia": "",
+                "Cond Fisc": l.acopio.cond_fisc,
+                "Cód. Neto": 202,
                 "Neto Gravado": 0.0,
                 "Alíc.": None,
                 "IVA Liquidado": 0.0,
                 "IVA Crédito": 0.0,
-                "Cód. NG/EX": 203,
-                "Conceptos NG/EX": float(exento_total) if exento_total else None,
+                "Cód. NG/EX": 202,
+                "Conceptos NG/EX": float(amt),
                 "Cód. P/R": "",
                 "Perc./Ret.": None,
                 "Pcia P/R": "",
-                "Total": float(exento_total or 0.0),
+                "Total": float(amt),
             })
 
     return pd.DataFrame(rows, columns=COMPRAS_COLUMNS)
