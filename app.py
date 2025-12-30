@@ -1,10 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from pathlib import Path
-import base64
-from PIL import Image
-
 import pandas as pd
 import streamlit as st
 
@@ -16,92 +12,13 @@ from exporters import (
     df_to_xlsx_bytes,
 )
 
-APP_TITLE = "IA Liquidaciones Agropecuarias"
+st.set_page_config(page_title="IA Liquidaciones Agropecuarias", layout="wide")
 
-# ----------------- Assets (logo + favicon) -----------------
-HERE = Path(__file__).parent
+st.title("IA Liquidaciones Agropecuarias")
+files = st.file_uploader("Subí una o más liquidaciones (PDF)", type=["pdf"], accept_multiple_files=True)
 
-def first_existing(*paths: Path):
-    for p in paths:
-        if p and p.exists():
-            return p
-    return None
-
-LOGO_PATH = first_existing(
-    HERE / "assets" / "logo_aie.png",
-    HERE / "logo_aie.png",
-)
-
-FAVICON_PATH = first_existing(
-    HERE / "assets" / "favicon-aie.ico",
-    HERE / "favicon-aie.ico",
-    HERE / "assets" / "favicon-aie.png",
-    HERE / "favicon-aie.png",
-)
-
-def img_to_b64(path: Path) -> str:
-    return base64.b64encode(path.read_bytes()).decode("utf-8")
-
-LOGO_B64 = img_to_b64(LOGO_PATH) if LOGO_PATH else ""
-
-def load_favicon(path: Path) -> Image.Image:
-    img = Image.open(path).convert("RGBA")
-    img = img.resize((32, 32))
-    return img
-
-# IMPORTANTE: set_page_config primero
-st.set_page_config(
-    page_title=APP_TITLE,
-    page_icon=load_favicon(FAVICON_PATH) if FAVICON_PATH else None,
-    layout="wide",
-)
-
-# ----------------- Header (logo arriba del título) -----------------
-st.markdown(
-    """
-    <style>
-      .block-container { padding-top: 1.6rem; }
-
-      .aie-header {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 10px;
-        margin-top: 6px;
-        margin-bottom: 10px;
-      }
-      .aie-header img {
-        width: 260px;   /* subí a 280/300 si querés más grande */
-        max-width: 70vw;
-        height: auto;
-      }
-      .aie-header h1 {
-        margin: 0;
-        padding: 0;
-      }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-
-if LOGO_B64:
-    st.markdown(
-        f"""
-        <div class="aie-header">
-          <img src="data:image/png;base64,{LOGO_B64}" alt="AIE Logo" />
-          <h1>{APP_TITLE}</h1>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-else:
-    st.title(APP_TITLE)
-
-files = st.file_uploader(
-    "Subí una o más liquidaciones (PDF)",
-    type=["pdf"],
-    accept_multiple_files=True
-)
+# Nuevo: control de duplicados por COE
+skip_duplicates = st.checkbox("Omitir duplicados (mismo COE)", value=True)
 
 def _fmt_monto(x):
     try:
@@ -115,30 +32,64 @@ def _fmt_alic(x):
     except Exception:
         return x
 
+def _fmt_int(x):
+    try:
+        return f"{int(x):,}".replace(",", ".")
+    except Exception:
+        return x
+
 if files:
     liqs = []
-    for f in files:
-        liqs.append(parse_liquidacion_pdf(f.getvalue(), f.name))
+    seen_by_coe = {}   # coe -> filename (primera aparición)
+    dup_rows = []      # para mostrar detalle
 
-    # Vista previa (la grilla estaba bien: mantenemos formato visible)
-    preview = pd.DataFrame([{
+    for f in files:
+        liq = parse_liquidacion_pdf(f.getvalue(), f.name)
+        coe = (liq.coe or "").strip()
+
+        if coe:
+            if coe in seen_by_coe:
+                dup_rows.append({
+                    "COE": coe,
+                    "Archivo duplicado": f.name,
+                    "Ya cargado": seen_by_coe[coe],
+                })
+                if skip_duplicates:
+                    continue
+            else:
+                seen_by_coe[coe] = f.name
+
+        liqs.append(liq)
+
+    if dup_rows:
+        st.warning("Se detectaron liquidaciones duplicadas por COE.")
+        st.dataframe(pd.DataFrame(dup_rows), use_container_width=True, hide_index=True)
+
+    if not liqs:
+        st.error("No quedaron liquidaciones para procesar (todas eran duplicadas por COE).")
+        st.stop()
+
+    # Base numérica (para resumen y grilla)
+    base = pd.DataFrame([{
         "Archivo": l.filename,
+        "COE": l.coe,
         "CUIT Comprador": l.comprador.cuit,
-        "Grano": l.grano,
+        "Grano": l.grano or "SIN DATO",
         "Campaña": l.campaña or "",
-        "Kg": l.kilos,
-        "Precio/Kg": l.precio,
-        "Neto": l.neto,
-        "Alic IVA": l.alic_iva,
-        "IVA": l.iva,
-        "Ret IVA": l.ret_iva,
-        "Ret Gan": l.ret_gan,  # siempre 0 por parser
-        "Total": l.total,
+        "Kg": float(l.kilos or 0.0),
+        "Precio/Kg": float(l.precio or 0.0),
+        "Neto": float(l.neto or 0.0),
+        "Alic IVA": float(l.alic_iva or 0.0),
+        "IVA": float(l.iva or 0.0),
+        "Ret IVA": float(l.ret_iva or 0.0),
+        "Ret Gan": float(l.ret_gan or 0.0),
+        "Total": float(l.total or 0.0),
     } for l in liqs])
 
+    # Vista previa (mantenemos formato visible)
     st.subheader("Vista previa")
     st.dataframe(
-        preview.style.format({
+        base.drop(columns=["COE"]).style.format({
             "Kg": _fmt_monto,
             "Precio/Kg": _fmt_monto,
             "Neto": _fmt_monto,
@@ -151,6 +102,49 @@ if files:
         use_container_width=True
     )
 
+    # Nuevo: Resumen por tipo de grano (segunda grilla)
+    st.subheader("Resumen por grano")
+    resumen = (
+        base.groupby("Grano", as_index=False)
+            .agg(
+                **{
+                    "Cant. Liquidaciones": ("Archivo", "count"),
+                    "Kg": ("Kg", "sum"),
+                    "Neto": ("Neto", "sum"),
+                    "IVA": ("IVA", "sum"),
+                    "Ret IVA": ("Ret IVA", "sum"),
+                    "Total": ("Total", "sum"),
+                }
+            )
+            .sort_values("Grano")
+    )
+
+    # Total general (fila final)
+    total_row = {
+        "Grano": "TOTAL",
+        "Cant. Liquidaciones": int(resumen["Cant. Liquidaciones"].sum()),
+        "Kg": float(resumen["Kg"].sum()),
+        "Neto": float(resumen["Neto"].sum()),
+        "IVA": float(resumen["IVA"].sum()),
+        "Ret IVA": float(resumen["Ret IVA"].sum()),
+        "Total": float(resumen["Total"].sum()),
+    }
+    resumen = pd.concat([resumen, pd.DataFrame([total_row])], ignore_index=True)
+
+    st.dataframe(
+        resumen.style.format({
+            "Cant. Liquidaciones": _fmt_int,
+            "Kg": _fmt_monto,
+            "Neto": _fmt_monto,
+            "IVA": _fmt_monto,
+            "Ret IVA": _fmt_monto,
+            "Total": _fmt_monto,
+        }),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    # Exportaciones (sin cambios)
     ventas_df = build_ventas_rows(liqs)
     cpns_df = build_cpns_rows(liqs)
     gastos_df = build_gastos_rows(liqs)
@@ -163,7 +157,6 @@ if files:
             data=df_to_xlsx_bytes(ventas_df, "Ventas"),
             file_name="ventas.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
         )
 
     with c2:
@@ -172,7 +165,6 @@ if files:
             data=df_to_xlsx_bytes(cpns_df, "CPNs"),
             file_name="cpns.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
         )
 
     with c3:
@@ -181,29 +173,4 @@ if files:
             data=df_to_xlsx_bytes(gastos_df, "Gastos"),
             file_name="gastos.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
         )
-
-# ----------------- Footer (igual a lo que ya venías usando) -----------------
-st.markdown(
-    """
-    <style>
-      .aie-footer{
-        position: fixed;
-        left: 0;
-        bottom: 0;
-        width: 100%;
-        background: #ffffff;
-        color: #6b7280;
-        text-align: center;
-        padding: 6px 0;
-        font-size: 12px;
-        border-top: 1px solid #e5e7eb;
-        z-index: 999;
-      }
-      .block-container{ padding-bottom: 48px; }
-    </style>
-    <div class="aie-footer">Herramienta para uso interno AIE San Justo | Developer Alfonso Alderete</div>
-    """,
-    unsafe_allow_html=True
-)
