@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
+from PIL import Image
 
 from parser import parse_liquidacion_pdf
 from exporters import (
@@ -12,12 +15,39 @@ from exporters import (
     df_to_xlsx_bytes,
 )
 
-st.set_page_config(page_title="IA Liquidaciones Agropecuarias", layout="wide")
+APP_TITLE = "IA Liquidaciones Agropecuarias"
 
-st.title("IA Liquidaciones Agropecuarias")
-files = st.file_uploader("Subí una o más liquidaciones (PDF)", type=["pdf"], accept_multiple_files=True)
+ASSETS_DIR = Path(__file__).parent / "assets"
+LOGO_PATH = ASSETS_DIR / "logo_aie.png"
+FAVICON_PATH = ASSETS_DIR / "favicon-aie.ico"
 
-# Nuevo: control de duplicados por COE
+# Favicon (debe ser Image o path válido)
+page_icon = None
+if FAVICON_PATH.exists():
+    try:
+        page_icon = Image.open(FAVICON_PATH)
+    except Exception:
+        page_icon = str(FAVICON_PATH)
+
+st.set_page_config(
+    page_title=APP_TITLE,
+    page_icon=page_icon,
+    layout="wide",
+)
+
+# Logo arriba del título (más grande)
+if LOGO_PATH.exists():
+    st.image(str(LOGO_PATH), width=260)
+
+st.title(APP_TITLE)
+
+files = st.file_uploader(
+    "Subí una o más liquidaciones (PDF)",
+    type=["pdf"],
+    accept_multiple_files=True
+)
+
+# Control de duplicados por COE
 skip_duplicates = st.checkbox("Omitir duplicados (mismo COE)", value=True)
 
 def _fmt_monto(x):
@@ -102,7 +132,7 @@ if files:
         use_container_width=True
     )
 
-    # Nuevo: Resumen por tipo de grano (segunda grilla)
+    # Resumen por tipo de grano (segunda grilla)
     st.subheader("Resumen por grano")
     resumen = (
         base.groupby("Grano", as_index=False)
@@ -119,7 +149,6 @@ if files:
             .sort_values("Grano")
     )
 
-    # Total general (fila final)
     total_row = {
         "Grano": "TOTAL",
         "Cant. Liquidaciones": int(resumen["Cant. Liquidaciones"].sum()),
@@ -174,3 +203,25 @@ if files:
             file_name="gastos.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
+# Footer fijo (sin romper layout)
+st.markdown(
+    """
+    <style>
+      .aie-footer{
+        position: fixed;
+        left: 0;
+        bottom: 0;
+        width: 100%;
+        padding: 8px 16px;
+        background: rgba(255,255,255,0.9);
+        border-top: 1px solid #e5e7eb;
+        color: #0f172a;
+        font-size: 12px;
+        z-index: 9999;
+      }
+    </style>
+    <div class="aie-footer">Herramienta para uso interno AIE San Justo | Developer Alfonso Alderete</div>
+    """,
+    unsafe_allow_html=True
+)
