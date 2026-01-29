@@ -441,13 +441,15 @@ def _extract_operation_from_ajuste_credito(full_text: str) -> Optional[Tuple[flo
     subtotal = float(vals[2] or 0.0)
 
     if len(vals) >= 6:
-        alic = float(vals[3] or 0.0)
-        importe_iva = float(vals[4] or 0.0)
-        total = float(vals[5] or 0.0)
+    alic = float(vals[3] or 0.0)
+    importe_iva = float(vals[4] or 0.0)
+    total = float(vals[5] or 0.0)
     else:
-        alic = 0.0
-        importe_iva = float(vals[3] or 0.0)
-        total = float(vals[4] or 0.0)
+    # Si no viene la alícuota en el PDF, se fija en 10,500 (sin calcular montos)
+    alic = 10.5
+    importe_iva = float(vals[3] or 0.0)
+    total = float(vals[4] or 0.0)
+
 
     return kilos, precio, subtotal, alic, importe_iva, total
 
