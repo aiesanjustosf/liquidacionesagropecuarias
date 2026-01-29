@@ -43,24 +43,19 @@ def parse_number(raw: str) -> Optional[float]:
     if not s or s in {".", ",", "-", "-.", "-,"}:
         return None
 
-    # If both separators exist, decide by last separator
     if "," in s and "." in s:
         last_comma = s.rfind(",")
         last_dot = s.rfind(".")
         if last_dot > last_comma:
-            # dot is decimal, commas thousands
             s = s.replace(",", "")
         else:
-            # comma is decimal, dots thousands
             s = s.replace(".", "").replace(",", ".")
     elif "," in s and "." not in s:
-        # comma decimal if ends with ,dd
         if re.search(r",\d{1,3}$", s):
             s = s.replace(".", "").replace(",", ".")
         else:
             s = s.replace(",", "")
     else:
-        # dot only or none
         s = s.replace(",", "")
 
     try:
@@ -135,7 +130,6 @@ class Liquidacion:
     coe: str
     pv: str
     numero: str
-    # Datos de encabezado (Acopiador/Consignatario)
     acopio: Party
     comprador: Party
     vendedor: Party
@@ -148,17 +142,14 @@ class Liquidacion:
     iva: float
     total: float
     campaña: str
-    # MERCADERIA ENTREGADA
     me_nro_comprobante: str
     me_grado: str
     me_factor: Optional[float]
     me_contenido_proteico: Optional[float]
     me_peso_kg: Optional[float]
     me_procedencia: str
-    # RETENCIONES
     ret_iva: float
     ret_gan: float
-    # DEDUCCIONES
     deducciones: List[DeductionLine]
 
 
@@ -366,9 +357,6 @@ def _extract_grain(page_text: str) -> Tuple[str, str]:
 
 
 def _extract_operation_numbers_standard(page_text: str) -> Tuple[float, float, float, float, float, float]:
-    """
-    Standard: returns kilos, precio, neto, alic_iva, iva, total
-    """
     m = re.search(
         r"\n\s*([0-9][0-9.,]*)\s*Kg\s*\$?\s*([0-9][0-9.,]*)\s*\$?\s*([0-9][0-9.,]*)\s*([0-9][0-9.,]*)\s*\$?\s*([0-9][0-9.,]*)\s*\$?\s*([0-9][0-9.,]*)",
         page_text,
@@ -388,22 +376,16 @@ def _extract_operation_numbers_standard(page_text: str) -> Tuple[float, float, f
 
 def _extract_operation_from_ajuste_credito(full_text: str) -> Optional[Tuple[float, float, float, float, float, float]]:
     """
-    Para "Tipo de operación: Ajuste unificado" buscar el bloque:
-      "CONDICIONES DE LA OPERACIÓN - AJUSTE CRÉDITO"
-    Dentro de ese bloque, en la tabla OPERACIÓN tomar:
-      - Subtotal (=> neto)
-      - Importe IVA (=> iva)
-      - Operación c/IVA (=> total)
-    NO se calcula IVA ni alícuota. Si la alícuota no está en la fila, queda 0.0.
+    En Ajuste Unificado: buscar "CONDICIONES DE LA OPERACIÓN - AJUSTE CRÉDITO" y tomar
+    de OPERACIÓN: Subtotal, Importe IVA, Operación c/IVA.
+    No se calculan montos. Si falta alícuota en la fila, se fija en 10.5.
     """
-    # Ubicar inicio del bloque AJUSTE CRÉDITO (soportar acentos y guiones)
     pat_start = r"CONDICIONES DE LA OPERACI[ÓO]N\s*[-–—]\s*AJUSTE CR[ÉE]DITO"
     m = re.search(pat_start, full_text, flags=re.IGNORECASE)
     if not m:
         return None
     start = m.start()
 
-    # Fin: próximo "CONDICIONES DE LA OPERACION" o "FIRMA" o fin del texto
     m_end = re.search(r"\n\s*CONDICIONES DE LA OPERACI[ÓO]N\b", full_text[m.end():], flags=re.IGNORECASE)
     end = m.end() + m_end.start() if m_end else len(full_text)
     sec = full_text[start:end]
@@ -417,7 +399,6 @@ def _extract_operation_from_ajuste_credito(full_text: str) -> Optional[Tuple[flo
     if op_idx is None:
         return None
 
-    # Buscar primera línea de datos que contenga "Kg"
     data_line = None
     for j in range(op_idx + 1, min(len(lines), op_idx + 12)):
         if re.search(r"\bKg\b", lines[j], flags=re.IGNORECASE) and re.search(r"\d", lines[j]):
@@ -426,13 +407,9 @@ def _extract_operation_from_ajuste_credito(full_text: str) -> Optional[Tuple[flo
     if not data_line:
         return None
 
-    # Extraer tokens numéricos en orden
     toks = re.findall(r"[-]?\d[\d.,]*", data_line)
     vals = [parse_number(t) for t in toks]
     vals = [v for v in vals if v is not None]
-    # Esperado:
-    # - 5 valores: kilos, precio, subtotal, importe_iva, total
-    # - 6 valores: kilos, precio, subtotal, alic, importe_iva, total
     if len(vals) < 5:
         return None
 
@@ -441,15 +418,14 @@ def _extract_operation_from_ajuste_credito(full_text: str) -> Optional[Tuple[flo
     subtotal = float(vals[2] or 0.0)
 
     if len(vals) >= 6:
-    alic = float(vals[3] or 0.0)
-    importe_iva = float(vals[4] or 0.0)
-    total = float(vals[5] or 0.0)
+        alic = float(vals[3] or 0.0)
+        importe_iva = float(vals[4] or 0.0)
+        total = float(vals[5] or 0.0)
     else:
-    # Si no viene la alícuota en el PDF, se fija en 10,500 (sin calcular montos)
-    alic = 10.5
-    importe_iva = float(vals[3] or 0.0)
-    total = float(vals[4] or 0.0)
-
+        # Si no viene la alícuota en el PDF, se fija en 10,500 (sin calcular montos)
+        alic = 10.5
+        importe_iva = float(vals[3] or 0.0)
+        total = float(vals[4] or 0.0)
 
     return kilos, precio, subtotal, alic, importe_iva, total
 
@@ -490,14 +466,14 @@ def _extract_me(page_text: str) -> Tuple[str, str, Optional[float], Optional[flo
         prot = parse_number(mrow.group(4))
         peso = parse_number(mrow.group(5))
     else:
-        m = re.search(r"\b(\d{10,14})\b", sec)
-        if m:
-            nro = m.group(1).strip()
+        m2 = re.search(r"\b(\d{10,14})\b", sec)
+        if m2:
+            nro = m2.group(1).strip()
             for line in sec.splitlines():
                 if nro in line:
-                    toks = re.findall(r"[-]?\d[\d.,]*", line)
-                    if toks:
-                        peso = parse_number(toks[-1])
+                    toks2 = re.findall(r"[-]?\d[\d.,]*", line)
+                    if toks2:
+                        peso = parse_number(toks2[-1])
                     break
 
     proced = ""
@@ -741,7 +717,6 @@ def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
 
     grano, cod_neto_venta = _extract_grain(full_text)
 
-    # --- Importes (regla especial para AJUSTE CRÉDITO dentro de AJUSTE UNIFICADO) ---
     op_adj = None
     if ("AJUSTE UNIFICADO" in full_norm) and re.search(r"AJUSTE\s+CREDITO", full_norm):
         op_adj = _extract_operation_from_ajuste_credito(full_text)
@@ -767,12 +742,10 @@ def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
             total=float(ar_4905),
         ))
 
-    # --- Negativos SOLO si es NC ---
     if es_nc:
         neto = _neg_abs(neto)
         iva = _neg_abs(iva)
         total = _neg_abs(total)
-
         ret_iva = _neg_abs(ret_iva)
         ret_gan = _neg_abs(ret_gan)
 
