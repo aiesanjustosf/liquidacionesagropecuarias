@@ -30,6 +30,7 @@ def parse_number(raw: str) -> Optional[float]:
     - 2,585.00 (US)
     - 27,14 (EU)
     - 2585000.00
+    Also supports negative.
     """
     if raw is None:
         return None
@@ -86,6 +87,14 @@ def parse_cuit_digits(raw: str) -> str:
     # Fallback: strip non-digits and keep only the first 11 (avoid accidental concatenations)
     d = re.sub(r"\D", "", s)
     return d[:11] if len(d) >= 11 else d
+
+
+def _neg_abs(v: Optional[float]) -> float:
+    """Forzar negativo en importes monetarios: -abs(x)."""
+    try:
+        return -abs(float(v or 0.0))
+    except Exception:
+        return 0.0
 
 
 # ------------------------- Domain -------------------------
@@ -169,6 +178,17 @@ GRAIN_CODES = {
 }
 
 
+def _is_nc(full_text_norm: str) -> bool:
+    """
+    NC cuando aparecen AMBAS:
+      - CONDICIONES DE LA OPERACION -/–/— AJUSTE CREDITO (guion flexible)
+      - AJUSTE UNIFICADO
+    Nota: usamos texto normalizado (sin acentos) pero el PDF puede traer guiones raros.
+    """
+    pat = r"CONDICIONES DE LA OPERACION\s*[-–—]\s*AJUSTE CREDITO"
+    return bool(re.search(pat, full_text_norm)) and ("AJUSTE UNIFICADO" in full_text_norm)
+
+
 def _detect_tipo_cbte(full_text_norm: str) -> str:
     if "LIQUIDACION SECUNDARIA" in full_text_norm:
         return "F2"
@@ -176,17 +196,14 @@ def _detect_tipo_cbte(full_text_norm: str) -> str:
 
 
 def _extract_header_date_loc(page_text: str) -> Tuple[str, str]:
-    # Usually: "20/11/2025, VIDELA" or "20/11/2025 - VIDELA"
     m = re.search(r"(\d{2}/\d{2}/\d{4})\s*[,–\-]\s*([^\n]+)", page_text)
     if m:
         return m.group(1).strip(), m.group(2).strip()
-    # fallback: first date anywhere
     m2 = re.search(r"(\d{2}/\d{2}/\d{4})", page_text)
     return (m2.group(1) if m2 else ""), ""
 
 
 def _party_from_text(side_text: str) -> Party:
-    """Parsea los campos habituales dentro del recuadro de COMPRADOR / VENDEDOR."""
     if not side_text:
         return Party()
     txt = side_text.replace("\r", "\n")
@@ -203,7 +220,6 @@ def _party_from_text(side_text: str) -> Party:
                 ln2 = lines[j]
                 if re.search(stop_regex, ln2, flags=re.IGNORECASE):
                     break
-                # cortar si aparecen otros rótulos
                 if re.search(r"\bRaz[oó]n\s+Social\b\s*:", ln2, flags=re.IGNORECASE):
                     break
                 if re.search(r"\bDomicilio\b\s*:", ln2, flags=re.IGNORECASE):
@@ -254,7 +270,6 @@ def _party_from_text(side_text: str) -> Party:
 
 
 def _group_words_to_lines(words: List[dict]) -> List[str]:
-    """Agrupa words de pdfplumber por línea usando coordenada 'top'."""
     if not words:
         return []
     ws = sorted(words, key=lambda w: (w.get("top", 0), w.get("x0", 0)))
@@ -279,12 +294,6 @@ def _group_words_to_lines(words: List[dict]) -> List[str]:
 
 
 def _extract_parties_from_layout(page: pdfplumber.page.Page) -> Tuple[Party, Party, Party]:
-    """
-    Extrae:
-      - acopio (se asume igual a COMPRADOR, recuadro izquierdo)
-      - comprador (recuadro izquierdo)
-      - vendedor (recuadro derecho)
-    """
     words = page.extract_words(keep_blank_chars=False, use_text_flow=True)
     width = float(page.width)
 
@@ -361,9 +370,6 @@ def _extract_grain(page_text: str) -> Tuple[str, str]:
 
 
 def _extract_operation_numbers(page_text: str) -> Tuple[float, float, float, float, float, float]:
-    """
-    Returns: kilos, precio, neto, alic_iva, iva, total
-    """
     m = re.search(
         r"\n\s*([0-9][0-9.,]*)\s*Kg\s*\$?\s*([0-9][0-9.,]*)\s*\$?\s*([0-9][0-9.,]*)\s*([0-9][0-9.,]*)\s*\$?\s*([0-9][0-9.,]*)\s*\$?\s*([0-9][0-9.,]*)",
         page_text,
@@ -447,18 +453,12 @@ def _looks_like_continuation(line: str) -> bool:
         return False
     if "REGIMEN" in u:
         return True
-    # si hay letras (y no es REGIMEN), no es continuación
     if re.search(r"[A-ZÁÉÍÓÚÑ]", u):
         return False
     return bool(re.search(r"\d", u))
 
 
 def _extract_retencion_iva_from_retenciones_table(full_text: str) -> float:
-    """
-    Toma el MONTO de Retención IVA del cuadro 'RETENCIONES' (columna 'Retenciones').
-    - NO toma la alícuota (%)
-    - Si no hay retenciones, devuelve 0.0
-    """
     up = full_text.upper()
     s = up.find("RETENCIONES")
     if s == -1:
@@ -467,16 +467,14 @@ def _extract_retencion_iva_from_retenciones_table(full_text: str) -> float:
     sec = full_text[s:s + 1200]
     lines = sec.splitlines()
 
-    # total AFIP (fallback)
-    m_total = re.search(r"Total\s+Retenciones\s+Afip\s*:\s*\$?\s*([0-9][0-9.,]*)", sec, flags=re.IGNORECASE)
+    m_total = re.search(r"Total\s+Retenciones\s+Afip\s*:\s*\$?\s*([-]?\d[\d.,]*)", sec, flags=re.IGNORECASE)
     total_afip = float(parse_number(m_total.group(1)) or 0.0) if m_total else None
 
-    # Buscar fila IVA en la TABLA: tiene "IVA" y "%" (la alícuota)
     iva_idx = None
     for i, ln in enumerate(lines):
         u = ln.upper()
         if "%" in u and re.search(r"\bI\.?\s*V\.?\s*A\.?\b", ln, flags=re.IGNORECASE):
-            if "IVA RG" in u:  # evitar resumen “IVA RG 4310…”
+            if "IVA RG" in u:
                 continue
             iva_idx = i
             break
@@ -493,44 +491,37 @@ def _extract_retencion_iva_from_retenciones_table(full_text: str) -> float:
             break
     block = " ".join(block_lines)
 
-    # 1) Prioridad: importes con '$' (retención suele venir así)
-    dols = [parse_number(m.group(1)) for m in re.finditer(r"\$\s*([0-9][0-9.,]*)", block)]
-    dols = [v for v in dols if v is not None and v > 0.0001]
+    dols = [parse_number(m.group(1)) for m in re.finditer(r"\$\s*([-]?\d[\d.,]*)", block)]
+    dols = [v for v in dols if v is not None and abs(v) > 0.0001]
     if dols:
-        return float(max(dols))
+        return float(max(dols, key=lambda x: abs(x)))
 
-    # 2) Si no hay '$', usar relación %: ret = base * % / 100
     pct = None
     mp = re.search(r"(\d{1,3}(?:[.,]\d{1,3})?)\s*%", block)
     if mp:
         pct = parse_number(mp.group(1))
 
     nums = [parse_number(n) for n in re.findall(r"[-]?\d[\d.,]*", block)]
-    nums = [v for v in nums if v is not None and v > 0.0001]
+    nums = [v for v in nums if v is not None and abs(v) > 0.0001]
 
     if pct is not None and len(nums) >= 2:
         best = None
         for base in nums:
             target = base * pct / 100.0
             for ret in nums:
-                if abs(ret - target) <= 0.01 * max(1.0, target):  # 1% tolerancia
-                    if best is None or ret > best:
+                if abs(ret - target) <= 0.01 * max(1.0, abs(target)):
+                    if best is None or abs(ret) > abs(best):
                         best = ret
         if best is not None:
             return float(best)
 
-    # 3) Fallback: el menor positivo del bloque (retención < base)
     if nums:
-        return float(min(nums))
+        return float(min(nums, key=lambda x: abs(x)))
 
     return total_afip or 0.0
 
 
 def _extract_retenciones(full_text: str) -> Tuple[float, float]:
-    """
-    Retorna (ret_iva, ret_gan).
-    En tu caso: ret_gan SIEMPRE 0.0 (no la generamos).
-    """
     ret_iva = _extract_retencion_iva_from_retenciones_table(full_text)
     ret_gan = 0.0
     return ret_iva, ret_gan
@@ -539,7 +530,6 @@ def _extract_retenciones(full_text: str) -> Tuple[float, float]:
 # ------------------------- DEDUCCIONES -------------------------
 
 def _extract_deducciones(page_text: str) -> List[DeductionLine]:
-    # Between DEDUCCIONES and RETENCIONES
     up = page_text.upper()
     s = up.find("DEDUCCIONES")
     e = up.find("RETENCIONES")
@@ -554,17 +544,16 @@ def _extract_deducciones(page_text: str) -> List[DeductionLine]:
     buffer = ""
 
     pat_full = re.compile(
-        r"^(.*?)\s+\$?\s*([0-9][0-9.,]*)\s+([0-9][0-9.,]*)%?\s+\$?\s*([0-9][0-9.,]*)\s+\$?\s*([0-9][0-9.,]*)\s*$"
+        r"^(.*?)\s+\$?\s*([-]?\d[\d.,]*)\s+([-]?\d[\d.,]*)%?\s+\$?\s*([-]?\d[\d.,]*)\s+\$?\s*([-]?\d[\d.,]*)\s*$"
     )
     pat_zero = re.compile(
-        r"^(.*?)\s+\$?\s*([0-9][0-9.,]*)\s+0%?\s+\$?\s*([0-9][0-9.,]*)\s+\$?\s*([0-9][0-9.,]*)\s*$"
+        r"^(.*?)\s+\$?\s*([-]?\d[\d.,]*)\s+0%?\s+\$?\s*([-]?\d[\d.,]*)\s+\$?\s*([-]?\d[\d.,]*)\s*$"
     )
 
     def looks_like_header(ln: str) -> bool:
         n = _norm(ln)
         if n.startswith("DEDUCCIONES"):
             return True
-        # encabezados típicos de tabla
         if "CONCEPTO" in n and ("ALICUOTA" in n or "ALÍCUOTA" in n):
             return True
         if "BASE" in n and ("CALC" in n or "CÁLC" in n):
@@ -579,8 +568,6 @@ def _extract_deducciones(page_text: str) -> List[DeductionLine]:
 
         ln2 = re.sub(r"\s+", " ", ln)
 
-        # Línea previa tipo "37711|Derechos..." que suele anteceder a la fila con importes.
-        # Si esa misma línea ya trae importes, NO la tratamos como pending.
         if re.match(r"^\d{3,7}\|", ln2) and ("$" not in ln2) and (not pat_full.search(ln2)) and (not pat_zero.search(ln2)):
             pending_detail = ln2
             continue
@@ -591,7 +578,6 @@ def _extract_deducciones(page_text: str) -> List[DeductionLine]:
         m0 = None if m else pat_zero.search(candidate)
 
         if not m and not m0:
-            # posible corte en 2 líneas: bufferizamos
             if len(candidate) < 220:
                 buffer = candidate
                 continue
@@ -627,12 +613,9 @@ def _extract_deducciones(page_text: str) -> List[DeductionLine]:
         ))
 
     return out
+
+
 def _extract_arancel_4905(page_text: str) -> float:
-    """
-    Extrae el monto del item 58487|Arancel Resolución 49/05 dentro del bloque RETENCIONES/OTROS.
-    Regla: si aparece '58487' o 'ARANCEL RESOLUCION', tomar el primer monto > 0 precedido por '$'
-    en esa línea o las siguientes (por si está cortado).
-    """
     up = page_text.upper()
     s = up.find("RETENCIONES")
     if s == -1:
@@ -667,18 +650,17 @@ def _extract_arancel_4905(page_text: str) -> float:
             pending = True
             vals = amounts_after_dollar(ln)
             for v in reversed(vals):
-                if v > 0:
+                if abs(v) > 0:
                     return v
             continue
 
         if pending:
             vals = amounts_after_dollar(ln)
             for v in reversed(vals):
-                if v > 0:
+                if abs(v) > 0:
                     return v
 
     return 0.0
-
 
 
 def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
@@ -690,7 +672,9 @@ def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
     full_norm = _norm(full_text)
 
     fecha, localidad = _extract_header_date_loc(page0_text)
-    tipo_cbte = _detect_tipo_cbte(full_norm)
+
+    es_nc = _is_nc(full_norm)
+    tipo_cbte = "F2" if es_nc else _detect_tipo_cbte(full_norm)
 
     mcoe = re.search(r"C\.O\.E\.\s*:\s*([0-9]{8,})", full_text, flags=re.IGNORECASE)
     coe = mcoe.group(1).strip() if mcoe else ""
@@ -713,7 +697,7 @@ def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
 
     ret_iva, ret_gan = _extract_retenciones(full_text)
     deducciones = _extract_deducciones(full_text)
-    # Extra: 58487|Arancel Resolución 49/05 dentro de RETENCIONES/OTROS (se trata como deducción exenta)
+
     ar_4905 = _extract_arancel_4905(full_text)
     if ar_4905 and float(ar_4905) != 0.0:
         deducciones.append(DeductionLine(
@@ -724,6 +708,24 @@ def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
             total=float(ar_4905),
         ))
 
+    if es_nc:
+        neto = _neg_abs(neto)
+        iva = _neg_abs(iva)
+        total = _neg_abs(total)
+
+        ret_iva = _neg_abs(ret_iva)
+        ret_gan = _neg_abs(ret_gan)
+
+        fixed: List[DeductionLine] = []
+        for d in deducciones:
+            fixed.append(DeductionLine(
+                concepto=d.concepto,
+                neto=_neg_abs(d.neto),
+                alic=float(d.alic),
+                iva=_neg_abs(d.iva),
+                total=_neg_abs(d.total),
+            ))
+        deducciones = fixed
 
     return Liquidacion(
         filename=filename,
