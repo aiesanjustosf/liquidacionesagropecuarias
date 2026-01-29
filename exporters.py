@@ -294,7 +294,6 @@ def df_to_xlsx_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
 
     # CPNs (una sola hoja)
     else:
-        # aplicar formatos por nombre si existen
         if "CANTIDAD DE KILOS" in col_idx:
             apply_format("CANTIDAD DE KILOS", fmt_amount)
         if "PRECIO" in col_idx:
@@ -303,7 +302,6 @@ def df_to_xlsx_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
             if nm in col_idx:
                 apply_format(nm, fmt_amount)
 
-        # widths razonables
         widths = []
         for i, name in enumerate(df.columns, start=1):
             widths.append(min(max(len(str(name)) + 2, 12), 45))
