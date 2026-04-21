@@ -46,7 +46,6 @@ def build_ventas_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
     rows: List[Dict[str, Any]] = []
 
     for l in liqs:
-        # Línea venta
         rows.append({
             "Fecha dd/mm/aaaa": l.fecha,
             "Cpbte": l.tipo_cbte,          # F1/F2
@@ -62,7 +61,7 @@ def build_ventas_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
             "Cond Fisc": l.comprador.cond_fisc,
             "Cód. Neto": l.cod_neto_venta,
             "Neto Gravado": float(l.neto or 0.0),
-            "Alíc.": float(l.alic_iva or 0.0),          # 10.5 (no 0.105)
+            "Alíc.": float(l.alic_iva or 0.0),   # 10.5
             "IVA Liquidado": float(l.iva or 0.0),
             "IVA Débito": float(l.iva or 0.0),
             "Cód. NG/EX": "",
@@ -73,7 +72,7 @@ def build_ventas_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
             "Total": float(l.total or 0.0),
         })
 
-        # Retención IVA (RV / RA07)
+        # Ret IVA (RV / RA07)
         if float(l.ret_iva or 0.0) != 0.0:
             amt = float(l.ret_iva or 0.0)
             rows.append({
@@ -102,7 +101,7 @@ def build_ventas_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
                 "Total": amt,
             })
 
-        # Retención Ganancias (RV / RA05) – si en el futuro la parseás
+        # Ret Gan (RV / RA05) si algún día la parseás
         if float(l.ret_gan or 0.0) != 0.0:
             amt = float(l.ret_gan or 0.0)
             rows.append({
@@ -162,13 +161,12 @@ def build_cpns_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
 
 def build_gastos_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
     """
-    Modelo compras (HWCpra1):
-    - Proveedor = acopio (encabezado)
+    Modelo compras:
+    - Proveedor = acopio
     - Cpbte = ND
     - Tipo = A
     - Gravado: 203 por defecto; si IVA 21% => 202
-    - Exento: 1 fila por gasto exento (Cód. NG/EX = 203, Total = exento)
-    - Si hay 2 alícuotas, se separan.
+    - Exento: 1 fila por gasto exento (Cód. NG/EX = 203) y Total = exento
     """
     rows: List[Dict[str, Any]] = []
 
@@ -188,7 +186,7 @@ def build_gastos_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
                 by_alic[alic][0] += float(d.neto or 0.0)
                 by_alic[alic][1] += float(d.iva or 0.0)
 
-        # Líneas gravadas
+        # Gravadas
         for alic in sorted(by_alic.keys()):
             neto, iva = by_alic[alic]
             mov = 202 if abs(alic - 21.0) < 0.001 else 203
@@ -198,7 +196,7 @@ def build_gastos_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
                 "Fecha Emisión ": l.fecha,
                 "Fecha Recepción": l.fecha,
                 "Cpbte": "ND",
-                "Tipo": l.letra,  # A
+                "Tipo": l.letra,
                 "Suc.": l.pv,
                 "Número": l.numero,
                 "Razón Social/Denominación Proveedor": (l.acopio.razon_social or "").strip(),
@@ -221,13 +219,13 @@ def build_gastos_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
                 "Total": float(total or 0.0),
             })
 
-        # Líneas exentas
+        # Exentas
         for amt in exentos:
             rows.append({
                 "Fecha Emisión ": l.fecha,
                 "Fecha Recepción": l.fecha,
                 "Cpbte": "ND",
-                "Tipo": l.letra,  # A
+                "Tipo": l.letra,
                 "Suc.": l.pv,
                 "Número": l.numero,
                 "Razón Social/Denominación Proveedor": (l.acopio.razon_social or "").strip(),
@@ -253,7 +251,7 @@ def build_gastos_rows(liqs: List[Liquidacion]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=COMPRAS_COLUMNS)
 
 
-# ------------------------- XLSX with correct formats -------------------------
+# ------------------------- XLSX formats -------------------------
 
 def _set_col_widths(ws, widths: List[float]):
     for i, w in enumerate(widths, start=1):
@@ -282,9 +280,11 @@ def df_to_xlsx_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
     col_idx = {name: i + 1 for i, name in enumerate(df.columns)}
     cols_set = set(df.columns)
 
-    # Formatos solicitados (forzados con punto miles y coma decimales)
+    # Formato pedido:
+    # - Montos: 1.000,00  -> '#.##0,00'
+    # - Alícuota: 10.500  -> '0.000'
     fmt_amount = '#.##0,00'
-    fmt_alic = '0,000'
+    fmt_alic = '0.000'
     fmt_cuit = '0'
 
     def apply_format(col_name: str, fmt: str):
@@ -309,7 +309,7 @@ def df_to_xlsx_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
             10, 14, 10, 14, 14, 10, 14, 10, 14, 10, 14
         ])
 
-    # Compras (Gastos)
+    # Compras / Gastos
     elif set(COMPRAS_COLUMNS).issubset(cols_set):
         for nm in ["Neto Gravado", "IVA Liquidado", "IVA Crédito", "Conceptos NG/EX", "Perc./Ret.", "Total"]:
             apply_format(nm, fmt_amount)
@@ -326,7 +326,7 @@ def df_to_xlsx_bytes(df: pd.DataFrame, sheet_name: str) -> bytes:
         if "CANTIDAD DE KILOS" in col_idx:
             apply_format("CANTIDAD DE KILOS", fmt_amount)
         if "PRECIO" in col_idx:
-            apply_format("PRECIO", '"$"#.##0,00')
+            apply_format("PRECIO", fmt_amount)
         for nm in ["ME - Factor", "ME - Contenido proteico", "ME - Peso (kg)"]:
             if nm in col_idx:
                 apply_format(nm, fmt_amount)
