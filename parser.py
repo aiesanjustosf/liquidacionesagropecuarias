@@ -188,26 +188,37 @@ GRAIN_CODES = {
 }
 
 
-def _is_nc(full_text_norm: str, full_text_raw: str) -> bool:
+def _is_nc(full_text_raw: str) -> bool:
     """
-    NC solo si:
-      - aparece CONDICIONES...AJUSTE CRÉDITO + AJUSTE UNIFICADO
-      - y el bloque AJUSTE CRÉDITO tiene algún importe != 0 (no solo $0,00)
-    """
-    pat = r"CONDICIONES DE LA OPERACION\s*[-–—]\s*AJUSTE CREDITO"
-    if not re.search(pat, full_text_norm):
-        return False
-    if "AJUSTE UNIFICADO" not in full_text_norm:
-        return False
+    NC SOLO si es Ajuste Unificado + Ajuste Crédito con importe real (no $0,00).
 
-    # Ventana del bloque "AJUSTE CRÉDITO"
+    Regla: si en el bloque 'CONDICIONES ... AJUSTE CRÉDITO' el 'Total Operación'
+    es distinto de 0, entonces es NC. Si es 0, NO es NC.
+    """
     raw_norm = _norm(full_text_raw)
-    m = re.search(pat, raw_norm)
+
+    pat_start = r"CONDICIONES DE LA OPERACION\s*[-–—]\s*AJUSTE CREDITO"
+    if "AJUSTE UNIFICADO" not in raw_norm:
+        return False
+    m = re.search(pat_start, raw_norm)
     if not m:
         return False
 
-    sec = full_text_raw[m.start(): m.start() + 1400]
+    # Recortar SOLO el bloque de Ajuste Crédito: desde su inicio hasta el próximo "CONDICIONES DE LA OPERACION"
+    start = m.start()
+    tail = raw_norm[m.end():]
+    m_next = re.search(r"CONDICIONES DE LA OPERACION\s*[-–—]\s*AJUSTE", tail)
+    end = m.end() + (m_next.start() if m_next else 1500)
 
+    sec = full_text_raw[start:end]
+
+    # 1) Prioridad: Total Operación: $ X
+    m_total = re.search(r"Total\s+Operaci[óo]n\s*:\s*\$?\s*([-]?\d[\d.,]*)", sec, flags=re.IGNORECASE)
+    if m_total:
+        v = parse_number(m_total.group(1))
+        return bool(v is not None and abs(v) > 0.0001)
+
+    # 2) Fallback: cualquier $ no-cero dentro del bloque
     vals = [parse_number(x) for x in re.findall(r"\$\s*([-]?\d[\d.,]*)", sec)]
     vals = [v for v in vals if v is not None]
     return any(abs(v) > 0.0001 for v in vals)
@@ -355,7 +366,6 @@ def _extract_parties_from_layout(page: pdfplumber.page.Page) -> Tuple[Party, Par
     comprador = _party_from_text(left_text)
     vendedor = _party_from_text(right_text)
 
-    # Acopio = comprador (encabezado)
     acopio = Party(
         razon_social=comprador.razon_social,
         domicilio=comprador.domicilio,
@@ -363,6 +373,7 @@ def _extract_parties_from_layout(page: pdfplumber.page.Page) -> Tuple[Party, Par
         cuit=comprador.cuit,
         iva=comprador.iva,
     )
+
     return acopio, comprador, vendedor
 
 
@@ -462,16 +473,6 @@ def _extract_me(page_text: str) -> Tuple[str, str, Optional[float], Optional[flo
         factor = parse_number(mrow.group(3))
         prot = parse_number(mrow.group(4))
         peso = parse_number(mrow.group(5))
-    else:
-        m2 = re.search(r"\b(\d{10,14})\b", sec)
-        if m2:
-            nro = m2.group(1).strip()
-            for line in sec.splitlines():
-                if nro in line:
-                    toks2 = re.findall(r"[-]?\d[\d.,]*", line)
-                    if toks2:
-                        peso = parse_number(toks2[-1])
-                    break
 
     proced = ""
     mloc = re.search(r"Localidad\s*:\s*([^\n]+)", sec, flags=re.IGNORECASE)
@@ -487,22 +488,8 @@ def _extract_kilos_ajuste(full_text: str, me_peso: Optional[float]) -> Optional[
         v = parse_kilos_ajuste(m.group(1))
         if v is not None and abs(v) > 0:
             return float(v)
-
-    m2 = re.search(r"\bCOE\s*a\s*ajustar\s*:\s*\d+\s*Kg\s*:\s*([-]?\d[\d.,]*)", full_text, flags=re.IGNORECASE)
-    if m2:
-        v = parse_kilos_ajuste(m2.group(1))
-        if v is not None and abs(v) > 0:
-            return float(v)
-
-    m3 = re.search(r"\bKg\s*:\s*([-]?\d[\d.,]*)", full_text, flags=re.IGNORECASE)
-    if m3:
-        v = parse_kilos_ajuste(m3.group(1))
-        if v is not None and abs(v) > 0:
-            return float(v)
-
     if me_peso is not None and abs(me_peso) > 0:
         return float(me_peso)
-
     return None
 
 
@@ -512,14 +499,12 @@ def _extract_ajustes_por_importe(full_text: str) -> Optional[Tuple[float, float]
     if s == -1:
         return None
     sec = full_text[s:s + 1200]
-
     for ln in sec.splitlines():
         if "ALIC." in ln.upper():
             dols = [parse_number(m.group(1)) for m in re.finditer(r"\$\s*([-]?\d[\d.,]*)", ln)]
             dols = [v for v in dols if v is not None]
             if len(dols) >= 2:
                 return float(dols[0]), float(dols[-1])
-
     return None
 
 
@@ -680,54 +665,6 @@ def _extract_deducciones(page_text: str) -> List[DeductionLine]:
     return out
 
 
-def _extract_arancel_4905(page_text: str) -> float:
-    up = page_text.upper()
-    s = up.find("RETENCIONES")
-    if s == -1:
-        return 0.0
-
-    e_candidates = [
-        up.find("IMPORTES TOTALES", s),
-        up.find("IMPORTE NETO A PAGAR", s),
-        up.find("CONDICIONES DE LA OPERACION", s),
-        up.find("CONDICIONES DE LA OPERACIÓN", s),
-    ]
-    e_candidates = [e for e in e_candidates if e != -1]
-    e = min(e_candidates) if e_candidates else len(page_text)
-
-    sec = page_text[s:e]
-    lines = [re.sub(r"\s+", " ", l.strip()) for l in sec.splitlines() if l.strip()]
-
-    def amounts_after_dollar(line: str) -> List[float]:
-        vals: List[float] = []
-        for tok in re.findall(r"\$\s*([-]?\d[\d.,]*)", line):
-            v = parse_number(tok)
-            if v is None:
-                continue
-            vals.append(float(v))
-        return vals
-
-    pending = False
-    for ln in lines:
-        n = _norm(ln)
-
-        if ("58487" in ln) or ("ARANCEL" in n and "RESOLUCION" in n):
-            pending = True
-            vals = amounts_after_dollar(ln)
-            for v in reversed(vals):
-                if abs(v) > 0:
-                    return v
-            continue
-
-        if pending:
-            vals = amounts_after_dollar(ln)
-            for v in reversed(vals):
-                if abs(v) > 0:
-                    return v
-
-    return 0.0
-
-
 def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
     with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
         page0 = pdf.pages[0]
@@ -738,10 +675,9 @@ def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
 
     fecha, localidad = _extract_header_date_loc(page0_text)
 
-    # NC: solo si es AJUSTE CRÉDITO + AJUSTE UNIFICADO con importes != 0
-    es_nc = _is_nc(full_norm, full_text)
+    # NC real (solo si el bloque ajuste crédito tiene total != 0)
+    es_nc = _is_nc(full_text)
 
-    # Tipo cbte: F1/F2 por LIQUIDACIÓN SECUNDARIA (Ajuste Débito sigue siendo F1)
     tipo_cbte = _detect_tipo_cbte(full_norm)
 
     mcoe = re.search(r"C\.O\.E\.\s*:\s*([0-9]{8,})", full_text, flags=re.IGNORECASE)
@@ -762,10 +698,8 @@ def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
     campaña = _extract_campaign(full_text)
     me_nro, me_grado, me_factor, me_prot, me_peso, me_proced = _extract_me(full_text)
 
-    # Operación base (robusta 5/6 columnas)
     kilos, precio, neto, alic_iva, iva, total = _extract_operation_numbers_standard(full_text)
 
-    # Ajuste unificado: preferimos kilos reales + importes "AJUSTES POR IMPORTE"
     is_ajuste_unificado = ("AJUSTE UNIFICADO" in full_norm)
     if is_ajuste_unificado:
         k_adj = _extract_kilos_ajuste(full_text, me_peso)
@@ -783,24 +717,13 @@ def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
     ret_iva, ret_gan = _extract_retenciones(full_text)
     deducciones = _extract_deducciones(full_text)
 
-    ar_4905 = _extract_arancel_4905(full_text)
-    if ar_4905 and float(ar_4905) != 0.0:
-        deducciones.append(DeductionLine(
-            concepto="58487|Arancel Resolución 49/05",
-            neto=float(ar_4905),
-            alic=0.0,
-            iva=0.0,
-            total=float(ar_4905),
-        ))
-
-    # Si es NC real, forzamos signos negativos
+    # SOLO si es NC real se fuerzan negativos
     if es_nc:
         neto = _neg_abs(neto)
         iva = _neg_abs(iva)
         total = _neg_abs(total)
         ret_iva = _neg_abs(ret_iva)
         ret_gan = _neg_abs(ret_gan)
-
         fixed: List[DeductionLine] = []
         for d in deducciones:
             fixed.append(DeductionLine(
