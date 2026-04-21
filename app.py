@@ -1,3 +1,4 @@
+# app.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
@@ -21,7 +22,10 @@ ASSETS_DIR = Path(__file__).parent / "assets"
 LOGO_PATH = ASSETS_DIR / "logo_aie.png"
 FAVICON_PATH = ASSETS_DIR / "favicon-aie.ico"
 
-# Favicon (debe ser Image o path válido)
+FOOTER = "Herramienta para uso interno AIE San Justo | Developer Alfonso Alderete"
+PRIVACY_NOTE = "La app no almacena datos, toda la información está protegida."
+
+# Favicon
 page_icon = None
 if FAVICON_PATH.exists():
     try:
@@ -35,7 +39,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# Logo arriba del título (más grande)
+# Header
 if LOGO_PATH.exists():
     st.image(str(LOGO_PATH), width=260)
 
@@ -46,8 +50,9 @@ files = st.file_uploader(
     type=["pdf"],
     accept_multiple_files=True
 )
+st.caption(PRIVACY_NOTE)
 
-# Control de duplicados por COE
+# Control duplicados por COE
 skip_duplicates = st.checkbox("Omitir duplicados (mismo COE)", value=True)
 
 def _fmt_monto(x):
@@ -70,8 +75,8 @@ def _fmt_int(x):
 
 if files:
     liqs = []
-    seen_by_coe = {}   # coe -> filename (primera aparición)
-    dup_rows = []      # para mostrar detalle
+    seen_by_coe = {}
+    dup_rows = []
 
     for f in files:
         liq = parse_liquidacion_pdf(f.getvalue(), f.name)
@@ -99,7 +104,6 @@ if files:
         st.error("No quedaron liquidaciones para procesar (todas eran duplicadas por COE).")
         st.stop()
 
-    # Base numérica (para resumen y grilla)
     base = pd.DataFrame([{
         "Archivo": l.filename,
         "COE": l.coe,
@@ -116,7 +120,6 @@ if files:
         "Total": float(l.total or 0.0),
     } for l in liqs])
 
-    # Vista previa (mantenemos formato visible)
     st.subheader("Vista previa")
     st.dataframe(
         base.drop(columns=["COE"]).style.format({
@@ -132,7 +135,6 @@ if files:
         use_container_width=True
     )
 
-    # Resumen por tipo de grano (segunda grilla)
     st.subheader("Resumen por grano")
     resumen = (
         base.groupby("Grano", as_index=False)
@@ -173,7 +175,6 @@ if files:
         hide_index=True
     )
 
-    # Exportaciones (sin cambios)
     ventas_df = build_ventas_rows(liqs)
     cpns_df = build_cpns_rows(liqs)
     gastos_df = build_gastos_rows(liqs)
@@ -186,6 +187,7 @@ if files:
             data=df_to_xlsx_bytes(ventas_df, "Ventas"),
             file_name="ventas.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
         )
 
     with c2:
@@ -194,6 +196,7 @@ if files:
             data=df_to_xlsx_bytes(cpns_df, "CPNs"),
             file_name="cpns.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
         )
 
     with c3:
@@ -202,9 +205,10 @@ if files:
             data=df_to_xlsx_bytes(gastos_df, "Gastos"),
             file_name="gastos.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
         )
 
-# Footer fijo (sin romper layout)
+# Footer fijo
 st.markdown(
     """
     <style>
@@ -214,7 +218,7 @@ st.markdown(
         bottom: 0;
         width: 100%;
         padding: 8px 16px;
-        background: rgba(255,255,255,0.9);
+        background: rgba(255,255,255,0.92);
         border-top: 1px solid #e5e7eb;
         color: #0f172a;
         font-size: 12px;
