@@ -188,14 +188,29 @@ GRAIN_CODES = {
 }
 
 
-def _is_nc(full_text_norm: str) -> bool:
+def _is_nc(full_text_norm: str, full_text_raw: str) -> bool:
     """
-    NC cuando aparecen AMBAS:
-      - CONDICIONES DE LA OPERACION - AJUSTE CREDITO (guion flexible)
-      - AJUSTE UNIFICADO
+    NC solo si:
+      - aparece CONDICIONES...AJUSTE CRÉDITO + AJUSTE UNIFICADO
+      - y el bloque AJUSTE CRÉDITO tiene algún importe != 0 (no solo $0,00)
     """
     pat = r"CONDICIONES DE LA OPERACION\s*[-–—]\s*AJUSTE CREDITO"
-    return bool(re.search(pat, full_text_norm)) and ("AJUSTE UNIFICADO" in full_text_norm)
+    if not re.search(pat, full_text_norm):
+        return False
+    if "AJUSTE UNIFICADO" not in full_text_norm:
+        return False
+
+    # Ventana del bloque "AJUSTE CRÉDITO"
+    raw_norm = _norm(full_text_raw)
+    m = re.search(pat, raw_norm)
+    if not m:
+        return False
+
+    sec = full_text_raw[m.start(): m.start() + 1400]
+
+    vals = [parse_number(x) for x in re.findall(r"\$\s*([-]?\d[\d.,]*)", sec)]
+    vals = [v for v in vals if v is not None]
+    return any(abs(v) > 0.0001 for v in vals)
 
 
 def _detect_tipo_cbte(full_text_norm: str) -> str:
@@ -340,6 +355,7 @@ def _extract_parties_from_layout(page: pdfplumber.page.Page) -> Tuple[Party, Par
     comprador = _party_from_text(left_text)
     vendedor = _party_from_text(right_text)
 
+    # Acopio = comprador (encabezado)
     acopio = Party(
         razon_social=comprador.razon_social,
         domicilio=comprador.domicilio,
@@ -347,7 +363,6 @@ def _extract_parties_from_layout(page: pdfplumber.page.Page) -> Tuple[Party, Par
         cuit=comprador.cuit,
         iva=comprador.iva,
     )
-
     return acopio, comprador, vendedor
 
 
@@ -723,10 +738,10 @@ def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
 
     fecha, localidad = _extract_header_date_loc(page0_text)
 
-    # NC: solo si es AJUSTE CRÉDITO + AJUSTE UNIFICADO
-    es_nc = _is_nc(full_norm)
+    # NC: solo si es AJUSTE CRÉDITO + AJUSTE UNIFICADO con importes != 0
+    es_nc = _is_nc(full_norm, full_text)
 
-    # Tipo cbte: F1/F2 por LIQUIDACIÓN SECUNDARIA. (Ajuste Débito sigue siendo F1)
+    # Tipo cbte: F1/F2 por LIQUIDACIÓN SECUNDARIA (Ajuste Débito sigue siendo F1)
     tipo_cbte = _detect_tipo_cbte(full_norm)
 
     mcoe = re.search(r"C\.O\.E\.\s*:\s*([0-9]{8,})", full_text, flags=re.IGNORECASE)
@@ -747,10 +762,10 @@ def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
     campaña = _extract_campaign(full_text)
     me_nro, me_grado, me_factor, me_prot, me_peso, me_proced = _extract_me(full_text)
 
-    # Operación estándar (robusta 5/6 cols)
+    # Operación base (robusta 5/6 columnas)
     kilos, precio, neto, alic_iva, iva, total = _extract_operation_numbers_standard(full_text)
 
-    # Ajuste unificado (débito o crédito): si existe, preferimos kilos de ajuste + importes de "AJUSTES POR IMPORTE"
+    # Ajuste unificado: preferimos kilos reales + importes "AJUSTES POR IMPORTE"
     is_ajuste_unificado = ("AJUSTE UNIFICADO" in full_norm)
     if is_ajuste_unificado:
         k_adj = _extract_kilos_ajuste(full_text, me_peso)
@@ -778,7 +793,7 @@ def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
             total=float(ar_4905),
         ))
 
-    # Si es NC (Ajuste Crédito + Ajuste Unificado), forzamos signos negativos
+    # Si es NC real, forzamos signos negativos
     if es_nc:
         neto = _neg_abs(neto)
         iva = _neg_abs(iva)
