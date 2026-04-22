@@ -204,7 +204,6 @@ def _is_nc(full_text_raw: str) -> bool:
     if not m:
         return False
 
-    # Recortar SOLO el bloque de Ajuste Crédito: desde su inicio hasta el próximo "CONDICIONES DE LA OPERACION"
     start = m.start()
     tail = raw_norm[m.end():]
     m_next = re.search(r"CONDICIONES DE LA OPERACION\s*[-–—]\s*AJUSTE", tail)
@@ -212,13 +211,11 @@ def _is_nc(full_text_raw: str) -> bool:
 
     sec = full_text_raw[start:end]
 
-    # 1) Prioridad: Total Operación: $ X
     m_total = re.search(r"Total\s+Operaci[óo]n\s*:\s*\$?\s*([-]?\d[\d.,]*)", sec, flags=re.IGNORECASE)
     if m_total:
         v = parse_number(m_total.group(1))
         return bool(v is not None and abs(v) > 0.0001)
 
-    # 2) Fallback: cualquier $ no-cero dentro del bloque
     vals = [parse_number(x) for x in re.findall(r"\$\s*([-]?\d[\d.,]*)", sec)]
     vals = [v for v in vals if v is not None]
     return any(abs(v) > 0.0001 for v in vals)
@@ -494,18 +491,45 @@ def _extract_kilos_ajuste(full_text: str, me_peso: Optional[float]) -> Optional[
 
 
 def _extract_ajustes_por_importe(full_text: str) -> Optional[Tuple[float, float]]:
+    """
+    AJUSTES POR IMPORTE puede traer varias líneas:
+      - Alic. 0 (sin IVA)  -> SE IGNORA (operativo, no se exporta)
+      - Alic. 10.5% / 21% -> SE SUMA (esto es lo que va a ventas)
+
+    Devuelve (neto_gravado, iva_gravado). Si no hay líneas con alícuota > 0, devuelve None.
+    """
     up = full_text.upper()
     s = up.find("AJUSTES POR IMPORTE")
     if s == -1:
         return None
-    sec = full_text[s:s + 1200]
+
+    sec = full_text[s:s + 2000]
+
+    neto_sum = 0.0
+    iva_sum = 0.0
+    found = False
+
     for ln in sec.splitlines():
-        if "ALIC." in ln.upper():
-            dols = [parse_number(m.group(1)) for m in re.finditer(r"\$\s*([-]?\d[\d.,]*)", ln)]
-            dols = [v for v in dols if v is not None]
-            if len(dols) >= 2:
-                return float(dols[0]), float(dols[-1])
-    return None
+        if "ALIC." not in ln.upper():
+            continue
+
+        m_al = re.search(r"ALIC\.\s*([0-9][0-9.,]*)", ln, flags=re.IGNORECASE)
+        if not m_al:
+            continue
+        alic = parse_number(m_al.group(1)) or 0.0
+
+        # Ignorar Alic. 0 (sin IVA)
+        if abs(alic) < 0.0001:
+            continue
+
+        dols = [parse_number(m.group(1)) for m in re.finditer(r"\$\s*([-]?\d[\d.,]*)", ln)]
+        dols = [v for v in dols if v is not None]
+        if len(dols) >= 2:
+            neto_sum += float(dols[0])
+            iva_sum += float(dols[-1])
+            found = True
+
+    return (neto_sum, iva_sum) if found else None
 
 
 # ------------------------- RETENCIONES -------------------------
@@ -675,9 +699,7 @@ def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
 
     fecha, localidad = _extract_header_date_loc(page0_text)
 
-    # NC real (solo si el bloque ajuste crédito tiene total != 0)
     es_nc = _is_nc(full_text)
-
     tipo_cbte = _detect_tipo_cbte(full_norm)
 
     mcoe = re.search(r"C\.O\.E\.\s*:\s*([0-9]{8,})", full_text, flags=re.IGNORECASE)
@@ -706,6 +728,7 @@ def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
         if k_adj is not None and abs(k_adj) > 0:
             kilos = float(k_adj)
 
+        # OJO: ahora esto devuelve SOLO lo gravado (alícuota > 0), ignorando Alic. 0
         nv = _extract_ajustes_por_importe(full_text)
         if nv is not None:
             neto = float(nv[0])
@@ -717,7 +740,6 @@ def parse_liquidacion_pdf(pdf_bytes: bytes, filename: str) -> Liquidacion:
     ret_iva, ret_gan = _extract_retenciones(full_text)
     deducciones = _extract_deducciones(full_text)
 
-    # SOLO si es NC real se fuerzan negativos
     if es_nc:
         neto = _neg_abs(neto)
         iva = _neg_abs(iva)
