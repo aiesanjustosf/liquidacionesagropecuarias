@@ -492,41 +492,59 @@ def _extract_kilos_ajuste(full_text: str, me_peso: Optional[float]) -> Optional[
 
 def _extract_ajustes_por_importe(full_text: str) -> Optional[Tuple[float, float]]:
     """
-    AJUSTES POR IMPORTE puede traer varias líneas:
-      - Alic. 0 (sin IVA)  -> SE IGNORA (operativo, no se exporta)
-      - Alic. 10.5% / 21% -> SE SUMA (esto es lo que va a ventas)
+    Devuelve (neto_gravado, iva_gravado) para AJUSTE UNIFICADO.
 
-    Devuelve (neto_gravado, iva_gravado). Si no hay líneas con alícuota > 0, devuelve None.
+    Regla: tomar SOLO ajustes con IVA (alícuota > 0). Ignorar Alic 0 / recuperaciones operativas.
+    Importante: escanea TODO el documento porque puede haber varios bloques (débito y crédito).
     """
-    up = full_text.upper()
-    s = up.find("AJUSTES POR IMPORTE")
-    if s == -1:
-        return None
-
-    sec = full_text[s:s + 2000]
-
     neto_sum = 0.0
     iva_sum = 0.0
     found = False
 
-    for ln in sec.splitlines():
-        if "ALIC." not in ln.upper():
+    for ln in full_text.splitlines():
+        line = ln.strip()
+        if not line:
+            continue
+        up = line.upper()
+
+        # Caso 1: "Alic. 10.5% $55.80 10.50 $5.86"
+        if "ALIC." in up:
+            m_al = re.search(r"ALIC\.\s*([0-9][0-9.,]*)", line, flags=re.IGNORECASE)
+            if not m_al:
+                continue
+            alic = parse_number(m_al.group(1)) or 0.0
+            if abs(alic) < 0.0001:
+                continue  # Alic 0 => ignorar
+
+            dols = [parse_number(m.group(1)) for m in re.finditer(r"\$\s*([-]?\d[\d.,]*)", line)]
+            dols = [v for v in dols if v is not None]
+            if len(dols) >= 2:
+                neto_sum += float(dols[0])
+                iva_sum += float(dols[-1])
+                found = True
             continue
 
-        m_al = re.search(r"ALIC\.\s*([0-9][0-9.,]*)", ln, flags=re.IGNORECASE)
-        if not m_al:
-            continue
-        alic = parse_number(m_al.group(1)) or 0.0
+        # Caso 2 (tu PDF): "Ajuste Calidades $128840.77 10.50 $13528.28"
+        # (importe) (alícuota) (importe iva)
+        if "$" in line:
+            m = re.search(
+                r"\$\s*([-]?\d[\d.,]*)\s+([0-9][0-9.,]*)\s+\$?\s*([-]?\d[\d.,]*)",
+                line
+            )
+            if not m:
+                continue
 
-        # Ignorar Alic. 0 (sin IVA)
-        if abs(alic) < 0.0001:
-            continue
+            imp = parse_number(m.group(1)) or 0.0
+            alic = parse_number(m.group(2)) or 0.0
+            iva = parse_number(m.group(3)) or 0.0
 
-        dols = [parse_number(m.group(1)) for m in re.finditer(r"\$\s*([-]?\d[\d.,]*)", ln)]
-        dols = [v for v in dols if v is not None]
-        if len(dols) >= 2:
-            neto_sum += float(dols[0])
-            iva_sum += float(dols[-1])
+            if abs(alic) < 0.0001:
+                continue  # sin IVA => ignorar
+            if abs(iva) < 0.0001:
+                continue  # sin IVA => ignorar (por tu regla “solo cuando tiene IVA”)
+
+            neto_sum += float(imp)
+            iva_sum += float(iva)
             found = True
 
     return (neto_sum, iva_sum) if found else None
